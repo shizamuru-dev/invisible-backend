@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let app = invisible_backend::app();
+    let app = relay::app();
 
     let addr = "0.0.0.0:3030";
     let listener = tokio::net::TcpListener::bind(addr).await?;

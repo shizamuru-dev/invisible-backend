@@ -1,0 +1,25 @@
+FROM rust:1-bookworm AS builder
+WORKDIR /app
+
+# Обновляем кэш и устанавливаем необходимые системные зависимости для сборки
+RUN apt-get update && apt-get install -y pkg-config libssl-dev
+
+# Копируем исходники проекта (весь workspace)
+COPY . .
+
+# Собираем конкретный бинарник микросервиса relay
+RUN cargo build --release --bin relay
+
+# Этап выполнения - минимальный образ Debian
+FROM debian:bookworm-slim
+WORKDIR /app
+
+# Устанавливаем runtime зависимости (например, сертификаты для https-запросов)
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Копируем собранный бинарник из этапа билдера
+COPY --from=builder /app/target/release/relay /usr/local/bin/relay
+
+# Запускаем бинарник
+EXPOSE 3030
+ENTRYPOINT ["relay"]
