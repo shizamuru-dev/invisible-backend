@@ -9,23 +9,31 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use shared::models::{IncomingMessage, OutgoingMessage, WsQuery};
-use std::{collections::HashMap, sync::Arc};
-use tokio::sync::{RwLock, mpsc};
+use shared::repository::{OfflineMessageRepository, PubSubRepository};
+use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 /// Shared application state
 pub struct AppState {
-    /// Maps user_id to an unbounded channel sender for that user
-    pub clients: RwLock<HashMap<String, mpsc::UnboundedSender<String>>>,
-    /// Queue for users who are currently offline
-    pub offline_queue: RwLock<HashMap<String, Vec<OutgoingMessage>>>,
+    /// Repository for offline messages
+    pub offline_repo: Arc<dyn OfflineMessageRepository>,
+    /// Redis client for creating PubSub connections
+    pub redis_client: redis::Client,
+    /// Repository for publishing messages
+    pub pubsub_repo: Arc<dyn PubSubRepository>,
 }
 
 /// Creates the router for the relay server
-pub fn app() -> Router {
+pub fn app(
+    offline_repo: Arc<dyn OfflineMessageRepository>,
+    redis_client: redis::Client,
+    pubsub_repo: Arc<dyn PubSubRepository>,
+) -> Router {
     let app_state = Arc::new(AppState {
-        clients: RwLock::new(HashMap::new()),
-        offline_queue: RwLock::new(HashMap::new()),
+        offline_repo,
+        redis_client,
+        pubsub_repo,
     });
 
     Router::new()
@@ -49,16 +57,16 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
-    // Register the user and retrieve any offline messages
-    let pending_messages = {
-        let mut clients = state.clients.write().await;
-        clients.insert(user_id.clone(), tx.clone());
-
-        let mut queue = state.offline_queue.write().await;
-        queue.remove(&user_id).unwrap_or_default()
+    // 1. Fetch offline messages from Postgres
+    let pending_messages = match state.offline_repo.fetch_and_delete_offline_messages(&user_id).await {
+        Ok(messages) => messages,
+        Err(e) => {
+            error!("Failed to fetch offline messages for {}: {}", user_id, e);
+            Vec::new()
+        }
     };
 
-    // Send pending offline messages and send delivery receipts back to their senders
+    // Send pending offline messages and send delivery receipts back to their senders via Redis
     for msg in pending_messages {
         if let Ok(json) = serde_json::to_string(&msg) {
             let _ = tx.send(json); // Send to current user
@@ -73,15 +81,18 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
         };
 
         if let Some((from, id)) = receipt_info {
-            let clients = state.clients.read().await;
-            if let Some(sender_tx) = clients.get(&from) {
-                let receipt = OutgoingMessage::DeliveryReceipt {
-                    to: user_id.clone(),
-                    message_id: id,
-                };
-                if let Ok(receipt_json) = serde_json::to_string(&receipt) {
-                    let _ = sender_tx.send(receipt_json);
-                }
+            let receipt = OutgoingMessage::DeliveryReceipt {
+                to: user_id.clone(),
+                message_id: id,
+            };
+            if let Ok(receipt_json) = serde_json::to_string(&receipt) {
+                let channel = format!("user:{}", from);
+                let pubsub_repo = state.pubsub_repo.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = pubsub_repo.publish_message(&channel, &receipt_json).await {
+                        error!("Failed to publish delivery receipt for message from {}: {}", from, e);
+                    }
+                });
             }
         }
     }
@@ -95,7 +106,23 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
         }
     });
 
-    // Task 2: Receive messages from the client's WebSocket and forward them
+    // Task 2: Listen to Redis PubSub for this user and forward to the local channel
+    let pubsub_client = state.redis_client.clone();
+    let channel_name = format!("user:{}", user_id);
+    let tx_pubsub = tx.clone();
+    let mut pubsub_task = tokio::spawn(async move {
+        if let Ok(mut pubsub) = pubsub_client.get_async_pubsub().await
+            && pubsub.subscribe(&channel_name).await.is_ok() {
+                let mut stream = pubsub.on_message();
+                while let Some(msg) = stream.next().await {
+                    if let Ok(payload) = msg.get_payload::<String>() {
+                        let _ = tx_pubsub.send(payload);
+                    }
+                }
+            }
+    });
+
+    // Task 3: Receive messages from the client's WebSocket and route them via Redis
     let state_clone = state.clone();
     let current_user_id = user_id.clone();
 
@@ -143,45 +170,35 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
                             ),
                         };
 
-                        if is_deliverable {
-                            let mut is_delivered = false;
-
-                            // Try to send to recipient if online
-                            {
-                                let clients = state_clone.clients.read().await;
-                                if let Some(recipient_tx) = clients.get(&to) {
-                                    #[allow(clippy::collapsible_if)]
-                                    if let Ok(json_str) = serde_json::to_string(&outgoing) {
-                                        is_delivered = recipient_tx.send(json_str).is_ok();
-                                    }
-                                }
-                            }
-
-                            if is_delivered {
-                                // Recipient got it, send a delivery receipt to the sender
-                                let receipt =
-                                    OutgoingMessage::DeliveryReceipt { to, message_id: id };
-                                let clients = state_clone.clients.read().await;
-                                if let Some(sender_tx) = clients.get(&current_user_id) {
-                                    #[allow(clippy::collapsible_if)]
+                        if let Ok(json_str) = serde_json::to_string(&outgoing) {
+                            let channel = format!("user:{}", to);
+                            
+                            // Publish to Redis
+                            let receivers = state_clone
+                                .pubsub_repo
+                                .publish_message(&channel, &json_str)
+                                .await
+                                .unwrap_or(0);
+                            
+                            if receivers > 0 {
+                                // Delivered successfully via Redis, send delivery receipt to sender if needed
+                                if is_deliverable {
+                                    let receipt = OutgoingMessage::DeliveryReceipt { to: to.clone(), message_id: id };
                                     if let Ok(receipt_json) = serde_json::to_string(&receipt) {
-                                        let _ = sender_tx.send(receipt_json);
+                                        // Sender is current_user_id, send to their channel
+                                        let sender_channel = format!("user:{}", current_user_id);
+                                        if let Err(e) = state_clone.pubsub_repo.publish_message(&sender_channel, &receipt_json).await {
+                                            error!("Failed to publish delivery receipt to sender {}: {}", current_user_id, e);
+                                        }
                                     }
                                 }
-                            } else {
-                                // Recipient is offline, put in queue
+                            } else if is_deliverable {
+                                // Nobody is subscribed, save to Postgres offline queue
                                 debug!("Recipient {} is offline. Queuing message {}", to, id);
-                                let mut queue = state_clone.offline_queue.write().await;
-                                queue.entry(to).or_default().push(outgoing);
-                            }
-                        } else {
-                            // Non-deliverable messages like Typing indicators
-                            let clients = state_clone.clients.read().await;
-                            if let Some(recipient_tx) = clients.get(&to) {
-                                #[allow(clippy::collapsible_if)]
-                                if let Ok(json_str) = serde_json::to_string(&outgoing) {
-                                    let _ = recipient_tx.send(json_str);
-                                }
+                                if let Ok(payload) = serde_json::to_value(&outgoing)
+                                    && let Err(e) = state_clone.offline_repo.save_offline_message(&to, &payload).await {
+                                        error!("Failed to save offline message to {}: {}", to, e);
+                                    }
                             }
                         }
                     }
@@ -193,14 +210,21 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
         }
     });
 
-    // Wait for either task to finish
+    // Wait for any task to finish, then abort the others
     tokio::select! {
-        _ = &mut send_task => recv_task.abort(),
-        _ = &mut recv_task => send_task.abort(),
+        _ = &mut send_task => {
+            recv_task.abort();
+            pubsub_task.abort();
+        },
+        _ = &mut recv_task => {
+            send_task.abort();
+            pubsub_task.abort();
+        },
+        _ = &mut pubsub_task => {
+            send_task.abort();
+            recv_task.abort();
+        }
     }
 
-    // Unregister the user on disconnect
     info!("User disconnected: {}", user_id);
-    let mut clients = state.clients.write().await;
-    clients.remove(&user_id);
 }

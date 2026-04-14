@@ -9,6 +9,10 @@ publish = false
 # Local workspace crates
 shared = { path = "../shared" }
 
+# Database
+sqlx = { workspace = true }
+redis = { workspace = true }
+
 # Web framework
 axum = { workspace = true, features = ["ws", "macros"] }
 futures = { workspace = true }

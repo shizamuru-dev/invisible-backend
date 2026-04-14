@@ -8,7 +8,7 @@ use tracing::info;
 /// Requires the `DATABASE_URL` environment variable to be set.
 pub async fn init_postgres() -> Result<PgPool> {
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://invisible:password@localhost:5432/invisible_chat".to_string());
+        .unwrap_or_else(|_| "postgres://invisible:password@127.0.0.1:5432/invisible_chat".to_string());
 
     info!("Connecting to PostgreSQL...");
     let pool = PgPoolOptions::new()
@@ -24,17 +24,17 @@ pub async fn init_postgres() -> Result<PgPool> {
 /// Initialize and return a Redis connection manager.
 ///
 /// Requires the `REDIS_URL` environment variable to be set.
-pub async fn init_redis() -> Result<ConnectionManager> {
+pub async fn init_redis() -> Result<(redis::Client, ConnectionManager)> {
     let redis_url = std::env::var("REDIS_URL")
-        .unwrap_or_else(|_| "redis://localhost:6379/".to_string());
+        .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_string());
 
     info!("Connecting to Redis...");
     let client = redis::Client::open(redis_url)
         .context("Invalid Redis URL")?;
         
-    let manager = ConnectionManager::new(client).await
+    let manager = ConnectionManager::new(client.clone()).await
         .context("Failed to create Redis connection manager")?;
 
     info!("Successfully connected to Redis");
-    Ok(manager)
+    Ok((client, manager))
 }
