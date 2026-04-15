@@ -10,3 +10,5 @@ sqlx = { workspace = true }
 redis = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+rust-s3 = "0.37.1"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

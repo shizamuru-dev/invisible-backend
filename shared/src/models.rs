@@ -3,7 +3,14 @@ use serde::{Deserialize, Serialize};
 /// Query parameters for the WebSocket connection
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
-    pub user_id: String,
+    pub token: String,
+}
+
+/// JWT Claims
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Claims {
+    pub sub: String,
+    pub exp: usize,
 }
 
 /// Message format expected from the client
@@ -24,6 +31,9 @@ pub enum IncomingMessage {
     },
     Typing {
         to: String,
+    },
+    WatchPresence {
+        user_ids: Vec<String>,
     },
 }
 
@@ -49,5 +59,9 @@ pub enum OutgoingMessage {
     DeliveryReceipt {
         to: String,
         message_id: String,
+    },
+    PresenceUpdate {
+        user_id: String,
+        is_online: bool,
     },
 }
