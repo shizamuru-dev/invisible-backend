@@ -82,11 +82,11 @@ where
             let mut token_from_query = None;
             for pair in query.split('&') {
                 let mut parts = pair.split('=');
-                if parts.next() == Some("token") {
-                    if let Some(t) = parts.next() {
-                        token_from_query = Some(t.to_string());
-                        break;
-                    }
+                if parts.next() == Some("token")
+                    && let Some(t) = parts.next()
+                {
+                    token_from_query = Some(t.to_string());
+                    break;
                 }
             }
             token_from_query.ok_or((StatusCode::UNAUTHORIZED, "Missing authorization token"))?
