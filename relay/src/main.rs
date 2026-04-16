@@ -1,6 +1,6 @@
 use anyhow::Result;
 use tracing::info;
-use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use shared::repository::{
     PgOfflineMessageRepository, RedisPresenceRepository, RedisPubSubRepository,
@@ -18,32 +18,13 @@ async fn main() -> Result<()> {
     };
 
     // Initialize tracing
-    if let Some(loki_url_str) = &config.loki_url {
-        let loki_url = url::Url::parse(loki_url_str)?;
-        let (loki_layer, loki_task) = tracing_loki::builder()
-            .label("service", "relay")?
-            .build_url(loki_url)?;
-
-        tokio::spawn(loki_task);
-        let boxed_loki = loki_layer.boxed();
-
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "invisible_backend=debug,relay=debug,shared=debug".into()),
-            )
-            .with(tracing_subscriber::fmt::layer())
-            .with(boxed_loki)
-            .init();
-    } else {
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "invisible_backend=debug,relay=debug,shared=debug".into()),
-            )
-            .with(tracing_subscriber::fmt::layer())
-            .init();
-    }
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "invisible_backend=debug,relay=debug,shared=debug".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 
     // Initialize databases
     let pg_pool = shared::db::init_postgres(&config).await?;

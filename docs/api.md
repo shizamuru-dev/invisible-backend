@@ -37,6 +37,31 @@ Messages sent by the client must be JSON strings with the following formats:
 }
 ```
 
+#### Encrypted Message (E2EE)
+Sends an end-to-end encrypted message. The `ciphertexts` array contains one entry per target device. The server cannot decrypt the content.
+
+```json
+{
+  "type": "Encrypted",
+  "to": "bob",
+  "id": "msg-e2ee-456",
+  "ciphertexts": [
+    {
+      "device_id": "550e8400-e29b-41d4-a716-446655440000",
+      "signal_type": 3,
+      "ciphertext": "BASE64_ENCODED_CIPHERTEXT"
+    },
+    {
+      "device_id": "661f9511-f3ac-52e5-b827-557766551111",
+      "signal_type": 1,
+      "ciphertext": "BASE64_ENCODED_CIPHERTEXT"
+    }
+  ]
+}
+```
+
+`signal_type` values: `3` = PreKey message (first message / new session), `1` = Normal message (established session).
+
 #### Typing Indicator
 ```json
 {
@@ -87,6 +112,26 @@ The server sends messages back to the client in these formats.
   "file_url": "http://localhost:9000/chat-files/image.png"
 }
 ```
+
+#### Encrypted Message (E2EE)
+Received when the sender sends an encrypted message targeting the current user's devices.
+
+```json
+{
+  "type": "Encrypted",
+  "from": "alice",
+  "id": "msg-e2ee-456",
+  "ciphertexts": [
+    {
+      "device_id": "550e8400-e29b-41d4-a716-446655440000",
+      "signal_type": 3,
+      "ciphertext": "BASE64_ENCODED_CIPHERTEXT"
+    }
+  ]
+}
+```
+
+The client should find the ciphertext entry matching its own `device_id` (from the JWT `session_id`) and decrypt it locally using the Signal Protocol session.
 
 #### Typing Indicator
 ```json
@@ -158,9 +203,17 @@ Authenticates a user and returns a session token. Also registers a new session i
 ```json
 {
   "username": "alice",
-  "password": "supersecretpassword123"
+  "password": "supersecretpassword123",
+  "device_info": {
+    "device_name": "Alice's iPhone",
+    "device_model": "iPhone 15 Pro",
+    "platform": "iOS",
+    "hwid": "hardware-id-abc123"
+  }
 }
 ```
+
+`device_info` is optional. If provided, the device is registered with the given metadata (used for E2EE device management).
 
 **Responses:**
 - `200 OK`:
@@ -178,33 +231,67 @@ Logs the user out of the current session, immediately invalidating the session i
 - `200 OK`: Successfully logged out.
 - `401 Unauthorized`: Missing, invalid, or expired token.
 
-### Sessions
+### E2EE Key Management
 
-All session endpoints require authentication with a valid Access token.
+All key management endpoints require authentication with a valid JWT token (Bearer header).
 
-#### `GET /api/sessions`
-Retrieves a list of all active sessions for the current user.
+#### `POST /keys/upload`
+Uploads the current device's cryptographic key bundle. Used for Signal Protocol X3DH key distribution. Should be called after device registration and periodically to replenish one-time keys.
+
+**Request Body (JSON):**
+```json
+{
+  "identity_key": "BASE64_ENCODED_IDENTITY_PUBLIC_KEY",
+  "registration_id": 12345,
+  "signed_pre_key": {
+    "key_id": 1,
+    "public_key": "BASE64_ENCODED_SIGNED_PRE_KEY",
+    "signature": "BASE64_ENCODED_SIGNATURE"
+  },
+  "one_time_keys": [
+    { "key_id": 1, "public_key": "BASE64_ENCODED_OTK_1" },
+    { "key_id": 2, "public_key": "BASE64_ENCODED_OTK_2" }
+  ]
+}
+```
 
 **Responses:**
-- `200 OK`:
-  ```json
-  [
+- `200 OK`: Keys uploaded successfully. Identity and Signed PreKey are upserted; OTKs are inserted (duplicates ignored).
+- `400 Bad Request`: Invalid session ID in JWT.
+- `401 Unauthorized`: Missing or invalid token.
+
+#### `GET /keys/claim/{username}`
+Claims the key bundle for all devices of a given user. Used by the sender to initiate an X3DH handshake with each device. **One-Time Keys are consumed atomically** -- each call pops one OTK per device.
+
+**Response:**
+```json
+{
+  "devices": [
     {
-      "id": "550e8400-e29b-41d4-a716-446655440000",
-      "device_name": "Alice's iPhone",
-      "device_model": "iPhone 13 Pro",
-      "platform": "iOS",
-      "last_accessed_at": "2026-04-16T12:00:00Z"
+      "device_id": "550e8400-e29b-41d4-a716-446655440000",
+      "identity_key": "BASE64...",
+      "registration_id": 12345,
+      "signed_pre_key": {
+        "key_id": 1,
+        "public_key": "BASE64...",
+        "signature": "BASE64..."
+      },
+      "one_time_key": {
+        "key_id": 1,
+        "public_key": "BASE64..."
+      },
+      "one_time_keys_remaining": 42
     }
   ]
-  ```
-
-#### `DELETE /api/sessions/{session_id}`
-Revokes a specific session by its ID, immediately invalidating its refresh token.
+}
+```
 
 **Responses:**
-- `200 OK`: Successfully revoked.
-- `404 Not Found`: Session not found or belongs to another user.
+- `200 OK`: Key bundles returned.
+- `404 Not Found`: No keys found for this user (user has no registered devices).
+- `401 Unauthorized`: Missing or invalid token.
+
+**Note:** `one_time_key` may be `null` if all OTKs for a device have been consumed. The client should still proceed with the X3DH handshake using only the Signed PreKey in this case (fallback mode). `one_time_keys_remaining` shows how many OTKs are left for that device (before the current claim). When it reaches 0, client should upload fresh OTKs via `POST /keys/upload`.
 
 ### Files
 

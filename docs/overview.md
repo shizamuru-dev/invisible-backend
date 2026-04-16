@@ -4,30 +4,31 @@
 
 ## Key Features
 
+- **End-to-End Encryption (E2EE):** The server acts as a blind relay and PKI server. Signal Protocol (X3DH + Double Ratchet) for 1-1 chats; Olm/Megolm architecture prepared for future group chats. The server never sees plaintext message content.
 - **WebSockets:** Provides real-time bidirectional communication.
 - **Redis Pub/Sub:** Enables horizontal scalability for routing messages between different server instances.
 - **Redis Streams & Batching:** Background workers handle asynchronous batch insertion into PostgreSQL to prevent database locks and maximize Write IOPS under high load.
 - **Redis Caching:** Session validation is cached in Redis to minimize synchronous database round-trips upon connection.
-- **PostgreSQL:** Reliable message history storage and offline message queuing.
-- **MinIO (S3):** Used for out-of-band file transfers to prevent WebSocket memory bloat.
+- **PostgreSQL:** Reliable message history storage, offline message queuing, and E2EE key distribution (device keys, signed pre-keys, one-time keys).
+- **MinIO (S3):** Used for out-of-band file transfers to prevent WebSocket memory bloat. Files are encrypted client-side before upload (AES-256-GCM with key exchange via Signal Protocol).
 
 ## Workspace Structure
 
 The project is organized into multiple crates:
 
-- `relay`: The WebSocket server handling real-time connections, message routing, Redis Stream publishing, and delivery receipts.
-- `api`: HTTP API service handling authentication, presigned URLs for MinIO, user management, and the asynchronous Database Worker.
-- `shared`: Shared models, database connections, and repository patterns used across services.
+- `relay`: The WebSocket server handling real-time connections, message routing (including E2EE encrypted blobs), Redis Stream publishing, and delivery receipts.
+- `api`: HTTP API service handling authentication, E2EE key distribution (`/keys/upload`, `/keys/claim`, `/keys/devices`), presigned URLs for MinIO, user management, and the asynchronous Database Worker.
+- `shared`: Shared models (including `DeviceCiphertext`, `IncomingMessage::Encrypted`, etc.), database connections, and repository patterns used across services.
 
 ## Prerequisites & Setup
 
 To start the infrastructure, run:
 
 ```bash
-docker-compose up -d postgres redis minio minio-init loki grafana
+docker-compose up -d postgres redis minio minio-init
 ```
 
-This will start PostgreSQL, Redis, MinIO, Grafana Loki (for log aggregation), and Grafana.
+This will start PostgreSQL, Redis, and MinIO.
 
 ## Configuration
 

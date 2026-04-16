@@ -8,8 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Read Receipts:** Added support for `ReadReceipt` messages. When a recipient opens the chat, the client sends a `ReadReceipt` which is then forwarded to the original sender (or queued if the sender is offline).
+- **Database Migrations:** Introduced `sqlx-cli` migrations (`migrations/`) instead of manual table creation in code, making schema evolutions safer.
+- **Configuration Management:** Migrated to `figment` for robust configuration loading. Configurations can now be set via `.env` or direct environment variables using the `AppConfig` struct.
 - GitHub Actions workflow (`release.yml`) for automated building of Docker images (`ghcr.io`) and creating GitHub Releases with compiled binaries.
 - Formal `CHANGELOG.md` file to track project history.
+
+### Changed
+- **Sessions & JWT:** Migrated to an Access/Refresh token architecture for improved performance and security.
+  - Short-lived stateless Access tokens (15 minutes) are used for HTTP and WebSocket authentication, removing the database bottleneck on every request.
+  - Refresh tokens are securely stored in the database and used via `POST /api/auth/refresh` to obtain new Access tokens.
+  - Sessions track device information (`device_name`, `device_model`, `platform`, `hwid`) and `last_accessed_at` timestamps.
+  - Old or inactive sessions (older than 30 days) are automatically pruned on new logins, and duplicate sessions from the same `hwid` are prevented.
+  - Added `/api/auth/logout`, `GET /api/sessions`, and `DELETE /api/sessions/{session_id}` HTTP endpoints for viewing and remote revocation of active sessions.
+  - Revoking a session immediately invalidates its Refresh token, requiring re-authentication once the short-lived Access token expires.
 
 ## [0.1.0] - 2026-04-15
 

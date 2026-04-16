@@ -70,11 +70,11 @@ pub async fn start_database_worker(db: PgPool, redis_client: redis::Client) {
                             if !key.ids.is_empty() {
                                 processed_any = true;
                             }
-                            let mut msg_ids = Vec::new();
+                            let mut parseable_ids = Vec::new();
+                            let mut unparseable_ids = Vec::new();
                             let mut events = Vec::new();
 
                             for stream_id in key.ids {
-                                msg_ids.push(stream_id.id.clone());
                                 if let Some(event_json) = stream_id.map.get("event")
                                     && let Ok(json_str) = String::from_redis_value(event_json)
                                 {
@@ -82,34 +82,39 @@ pub async fn start_database_worker(db: PgPool, redis_client: redis::Client) {
                                         serde_json::from_str::<DatabaseEvent>(&json_str)
                                     {
                                         events.push(event);
+                                        parseable_ids.push(stream_id.id.clone());
                                     } else {
                                         error!("Failed to parse DatabaseEvent JSON: {}", json_str);
+                                        unparseable_ids.push(stream_id.id.clone());
                                     }
+                                } else {
+                                    unparseable_ids.push(stream_id.id.clone());
                                 }
+                            }
+
+                            // Always ACK unparseable messages so they don't block PEL
+                            if !unparseable_ids.is_empty() {
+                                let mut cmd = redis::cmd("XACK");
+                                cmd.arg(stream_name).arg(group_name);
+                                for id in &unparseable_ids {
+                                    cmd.arg(id);
+                                }
+                                let _: redis::RedisResult<()> = cmd.query_async(&mut conn).await;
                             }
 
                             if !events.is_empty() {
                                 if let Err(e) = process_events_batch(&db, events).await {
                                     error!("Failed to process event batch: {}", e);
-                                    // Depending on policy, we might not ack to retry later
+                                    // Don't ACK parseable_ids — they will be retried via PEL
                                 } else {
-                                    // Acknowledge successfully processed messages
                                     let mut cmd = redis::cmd("XACK");
                                     cmd.arg(stream_name).arg(group_name);
-                                    for id in &msg_ids {
+                                    for id in &parseable_ids {
                                         cmd.arg(id);
                                     }
                                     let _: redis::RedisResult<()> =
                                         cmd.query_async(&mut conn).await;
                                 }
-                            } else if !msg_ids.is_empty() {
-                                // Ack unparseable messages so they don't block
-                                let mut cmd = redis::cmd("XACK");
-                                cmd.arg(stream_name).arg(group_name);
-                                for id in &msg_ids {
-                                    cmd.arg(id);
-                                }
-                                let _: redis::RedisResult<()> = cmd.query_async(&mut conn).await;
                             }
                         }
                     }
@@ -131,12 +136,12 @@ pub async fn start_database_worker(db: PgPool, redis_client: redis::Client) {
     }
 }
 
-async fn process_events_batch(db: &PgPool, events: Vec<DatabaseEvent>) -> Result<()> {
+pub async fn process_events_batch(db: &PgPool, events: Vec<DatabaseEvent>) -> Result<()> {
     debug!("Worker processing batch of {} events", events.len());
 
-    // Separate NewMessages and ReadReceipts
     let mut new_messages = Vec::new();
     let mut read_receipts = Vec::new();
+    let mut encrypted_messages = Vec::new();
 
     for event in events {
         match event {
@@ -160,6 +165,14 @@ async fn process_events_batch(db: &PgPool, events: Vec<DatabaseEvent>) -> Result
                     mime_type,
                     file_url,
                 ));
+            }
+            DatabaseEvent::NewEncryptedMessage {
+                id,
+                sender,
+                recipient,
+                ciphertexts,
+            } => {
+                encrypted_messages.push((id, sender, recipient, ciphertexts));
             }
             DatabaseEvent::ReadReceipt { message_id } => {
                 read_receipts.push(message_id);
@@ -187,6 +200,61 @@ async fn process_events_batch(db: &PgPool, events: Vec<DatabaseEvent>) -> Result
 
         query_builder.push(" ON CONFLICT (id) DO NOTHING");
         query_builder.build().execute(&mut *tx).await?;
+    }
+
+    if !encrypted_messages.is_empty() {
+        // Insert messages first
+        let mut msg_builder = sqlx::QueryBuilder::new(
+            "INSERT INTO messages (id, sender_username, recipient_username, message_type, content, file_name, mime_type, file_url) ",
+        );
+        msg_builder.push_values(&encrypted_messages, |mut b, (id, sender, recipient, _)| {
+            b.push_bind(id)
+                .push_bind(sender)
+                .push_bind(recipient)
+                .push_bind("encrypted")
+                .push_bind(None::<String>)
+                .push_bind(None::<String>)
+                .push_bind(None::<String>)
+                .push_bind(None::<String>);
+        });
+        msg_builder.push(" ON CONFLICT (id) DO NOTHING");
+        msg_builder.build().execute(&mut *tx).await?;
+
+        // Insert ciphertexts
+        let mut ciphertexts_data = Vec::new();
+        for (id, _, _, ciphertexts) in encrypted_messages {
+            for ct in ciphertexts {
+                let device_uuid_res = uuid::Uuid::parse_str(&ct.device_id);
+                if let Ok(device_uuid) = device_uuid_res {
+                    ciphertexts_data.push((
+                        uuid::Uuid::new_v4(),
+                        id.clone(),
+                        device_uuid,
+                        ct.ciphertext,
+                        ct.signal_type,
+                    ));
+                } else {
+                    error!("Invalid device UUID: {}", ct.device_id);
+                }
+            }
+        }
+
+        if !ciphertexts_data.is_empty() {
+            let mut ct_builder = sqlx::QueryBuilder::new(
+                "INSERT INTO message_ciphertexts (id, message_id, device_id, ciphertext, signal_type) ",
+            );
+            ct_builder.push_values(
+                ciphertexts_data,
+                |mut b, (id, msg_id, device_id, ciphertext, signal_type)| {
+                    b.push_bind(id)
+                        .push_bind(msg_id)
+                        .push_bind(device_id)
+                        .push_bind(ciphertext)
+                        .push_bind(signal_type);
+                },
+            );
+            ct_builder.build().execute(&mut *tx).await?;
+        }
     }
 
     if !read_receipts.is_empty() {

@@ -193,9 +193,9 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
 
         // If it was a text or file message, notify the original sender that it was delivered
         let receipt_info = match &msg {
-            OutgoingMessage::Text { from, id, .. } | OutgoingMessage::File { from, id, .. } => {
-                Some((from.clone(), id.clone()))
-            }
+            OutgoingMessage::Text { from, id, .. }
+            | OutgoingMessage::Encrypted { from, id, .. }
+            | OutgoingMessage::File { from, id, .. } => Some((from.clone(), id.clone())),
             _ => None,
         };
 
@@ -256,6 +256,21 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
                 match serde_json::from_str::<IncomingMessage>(&text) {
                     Ok(parsed_msg) => {
                         let (requires_receipt, store_offline, to, id, outgoing) = match parsed_msg {
+                            IncomingMessage::Encrypted {
+                                to,
+                                id,
+                                ciphertexts,
+                            } => (
+                                true,
+                                true,
+                                to,
+                                id.clone(),
+                                OutgoingMessage::Encrypted {
+                                    from: current_user_id.clone(),
+                                    id,
+                                    ciphertexts,
+                                },
+                            ),
                             IncomingMessage::Text { to, id, content } => (
                                 true,
                                 true,
@@ -360,6 +375,16 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
 
                         if let Some(mut r) = redis_conn {
                             let db_event = match &outgoing {
+                                OutgoingMessage::Encrypted {
+                                    from,
+                                    id,
+                                    ciphertexts,
+                                } => Some(shared::models::DatabaseEvent::NewEncryptedMessage {
+                                    id: id.clone(),
+                                    sender: from.clone(),
+                                    recipient: to.clone(),
+                                    ciphertexts: ciphertexts.clone(),
+                                }),
                                 OutgoingMessage::Text { from, id, content } => {
                                     Some(shared::models::DatabaseEvent::NewMessage {
                                         id: id.clone(),
