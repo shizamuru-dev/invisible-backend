@@ -140,7 +140,7 @@ pub async fn process_events_batch(db: &PgPool, events: Vec<DatabaseEvent>) -> Re
     debug!("Worker processing batch of {} events", events.len());
 
     let mut new_messages = Vec::new();
-    let mut read_receipts = Vec::new();
+    let mut read_receipts: Vec<(String, String)> = Vec::new();
     let mut encrypted_messages = Vec::new();
 
     for event in events {
@@ -174,8 +174,8 @@ pub async fn process_events_batch(db: &PgPool, events: Vec<DatabaseEvent>) -> Re
             } => {
                 encrypted_messages.push((id, sender, recipient, ciphertexts));
             }
-            DatabaseEvent::ReadReceipt { message_id } => {
-                read_receipts.push(message_id);
+            DatabaseEvent::ReadReceipt { message_id, reader } => {
+                read_receipts.push((message_id, reader));
             }
         }
     }
@@ -258,15 +258,42 @@ pub async fn process_events_batch(db: &PgPool, events: Vec<DatabaseEvent>) -> Re
     }
 
     if !read_receipts.is_empty() {
-        // Build a single update for all read receipts
-        let mut query_builder =
-            sqlx::QueryBuilder::new("UPDATE messages SET read_at = NOW() WHERE id IN (");
-        let mut separated = query_builder.separated(", ");
-        for id in read_receipts {
-            separated.push_bind(id);
+        let message_ids: Vec<String> = read_receipts.iter().map(|(id, _)| id.clone()).collect();
+
+        #[derive(Debug, sqlx::FromRow)]
+        struct MessageSender {
+            id: String,
+            sender_username: String,
         }
-        separated.push_unseparated(") AND read_at IS NULL");
-        query_builder.build().execute(&mut *tx).await?;
+
+        let messages: Vec<MessageSender> =
+            sqlx::query_as("SELECT id, sender_username FROM messages WHERE id = ANY($1)")
+                .bind(&message_ids)
+                .fetch_all(&mut *tx)
+                .await?;
+
+        let message_map: std::collections::HashMap<String, String> = messages
+            .into_iter()
+            .map(|m| (m.id, m.sender_username))
+            .collect();
+
+        for (message_id, reader) in read_receipts {
+            if let Some(sender) = message_map.get(&message_id) {
+                sqlx::query(
+                    r#"
+                    INSERT INTO dialog_read_states (user_username, peer_username, last_read_message_id, unread_count, updated_at)
+                    VALUES ($1, $2, $3, 0, NOW())
+                    ON CONFLICT (user_username, peer_username)
+                    DO UPDATE SET last_read_message_id = $3, unread_count = 0, updated_at = NOW()
+                    "#
+                )
+                .bind(&reader)
+                .bind(sender)
+                .bind(&message_id)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
     }
 
     tx.commit().await?;

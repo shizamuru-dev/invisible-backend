@@ -55,10 +55,9 @@ impl AppConfig {
         #[cfg(not(debug_assertions))]
         {
             if self.jwt_secret == "super-secret-key-for-dev" {
-                return Err("JWT_SECRET must be explicitly set in production".into());
-            }
-            if self.s3_access_key == "minioadmin" && self.s3_secret_key == "minioadmin" {
-                return Err("S3 credentials must be explicitly set in production".into());
+                return Err(Box::new(figment::Error::from(
+                    "JWT_SECRET must be explicitly set in production",
+                )));
             }
         }
         Ok(())

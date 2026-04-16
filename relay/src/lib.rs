@@ -416,6 +416,7 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
                                 OutgoingMessage::ReadReceipt { message_id, .. } => {
                                     Some(shared::models::DatabaseEvent::ReadReceipt {
                                         message_id: message_id.clone(),
+                                        reader: current_user_id.clone(),
                                     })
                                 }
                                 _ => None,

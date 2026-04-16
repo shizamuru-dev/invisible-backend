@@ -348,11 +348,12 @@ async fn given_two_users_when_encrypted_message_sent_then_other_receives_it() {
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let bob_session_id: String =
-        sqlx::query_scalar("SELECT id FROM sessions WHERE user_username = 'bob_e2ee' LIMIT 1")
-            .fetch_one(&pg_pool)
-            .await
-            .unwrap();
+    let bob_session_id: String = sqlx::query_scalar(
+        "SELECT id::text FROM sessions WHERE user_username = 'bob_e2ee' LIMIT 1",
+    )
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
 
     let encrypted_incoming = IncomingMessage::Encrypted {
         to: "bob_e2ee".to_string(),
@@ -413,18 +414,28 @@ async fn given_two_users_when_encrypted_message_sent_then_other_receives_it() {
 async fn given_offline_user_when_encrypted_message_sent_then_received_on_connect() {
     let (addr, pg_pool) = start_test_server().await;
 
-    // Charlie sends encrypted message to Dave (who is offline)
+    // Dave connects first to create a session, then disconnects
+    let dave_token = generate_token_and_session("dave_e2ee", &pg_pool).await;
+    let dave_url = format!("ws://{}/ws?token={}", addr, dave_token);
+    let (dave_ws, _) = connect_async(&dave_url).await.unwrap();
+    drop(dave_ws); // Disconnect Dave
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Get Dave's session ID after he's connected and disconnected
+    let dave_session_id: String = sqlx::query_scalar(
+        "SELECT id::text FROM sessions WHERE user_username = 'dave_e2ee' LIMIT 1",
+    )
+    .fetch_one(&pg_pool)
+    .await
+    .unwrap();
+
+    // Charlie connects and sends encrypted message to Dave
     let charlie_token = generate_token_and_session("charlie_e2ee", &pg_pool).await;
     let charlie_url = format!("ws://{}/ws?token={}", addr, charlie_token);
     let (mut charlie_ws, _) = connect_async(&charlie_url).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-    let dave_session_id: String =
-        sqlx::query_scalar("SELECT id FROM sessions WHERE user_username = 'dave_e2ee' LIMIT 1")
-            .fetch_one(&pg_pool)
-            .await
-            .unwrap();
 
     let encrypted_incoming = IncomingMessage::Encrypted {
         to: "dave_e2ee".to_string(),
@@ -444,8 +455,7 @@ async fn given_offline_user_when_encrypted_message_sent_then_received_on_connect
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Dave connects
-    let dave_token = generate_token_and_session("dave_e2ee", &pg_pool).await;
+    // Dave reconnects
     let dave_url = format!("ws://{}/ws?token={}", addr, dave_token);
     let (mut dave_ws, _) = connect_async(&dave_url).await.unwrap();
 

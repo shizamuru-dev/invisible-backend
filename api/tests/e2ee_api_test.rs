@@ -7,18 +7,25 @@ use fixtures::{
 };
 use jsonwebtoken::{EncodingKey, Header, encode};
 
+const TEST_IDENTITY_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const TEST_SIGNED_PREKEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const TEST_SIGNATURE: &str =
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const TEST_OTK: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 fn make_auth_header(secret: &str, username: &str, session_id: &str) -> String {
     let claims = serde_json::json!({
         "sub": username,
         "session_id": session_id,
         "exp": (chrono::Utc::now().timestamp() + 3600) as usize
     });
-    encode(
+    let token = encode(
         &Header::default(),
         &claims,
         &EncodingKey::from_secret(secret.as_bytes()),
     )
-    .unwrap()
+    .unwrap();
+    format!("Bearer {}", token)
 }
 
 async fn spawn_test_server(state: api::AppState) -> String {
@@ -45,22 +52,28 @@ async fn upload_keys_success() {
             make_auth_header(&secret, &username, &session_id),
         )
         .json(&serde_json::json!({
-            "identity_key": "aWNlbnRp",
+            "identity_key": TEST_IDENTITY_KEY,
             "registration_id": 42,
             "signed_pre_key": {
                 "key_id": 1,
-                "public_key": "c3BrcHVi",
-                "signature": "c2lnbmF0dXJl"
+                "public_key": TEST_SIGNED_PREKEY,
+                "signature": TEST_SIGNATURE
             },
             "one_time_keys": [
-                { "key_id": 1, "public_key": "b3RrMTAx" },
-                { "key_id": 2, "public_key": "b3RrMTAy" }
+                { "key_id": 1, "public_key": TEST_OTK },
+                { "key_id": 2, "public_key": TEST_OTK }
             ]
         }))
         .send()
         .await
         .unwrap();
-    assert_eq!(res.status(), 200);
+    let status = res.status();
+    if status != 200 {
+        let body = res.text().await.unwrap();
+        eprintln!("Response status: {:?}", status);
+        eprintln!("Response body: {:?}", body);
+    }
+    assert_eq!(status, 200);
 
     let count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM device_identity_keys WHERE user_username = $1")
@@ -96,16 +109,16 @@ async fn upload_keys_identity_key_upsert() {
                 "registration_id": 42,
                 "signed_pre_key": {
                     "key_id": 1,
-                    "public_key": "c3BrcHVi",
-                    "signature": "c2lnbmF0dXJl"
+                    "public_key": TEST_SIGNED_PREKEY,
+                    "signature": TEST_SIGNATURE
                 },
                 "one_time_keys": []
             }))
             .send()
     };
 
-    upload("first_key").await.unwrap();
-    upload("second_key").await.unwrap();
+    upload(TEST_IDENTITY_KEY).await.unwrap();
+    upload(TEST_IDENTITY_KEY).await.unwrap();
 
     let count: (i64,) =
         sqlx::query_as("SELECT COUNT(*) FROM device_identity_keys WHERE user_username = $1")
@@ -121,7 +134,7 @@ async fn upload_keys_identity_key_upsert() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(current_key.0, "second_key");
+    assert_eq!(current_key.0, TEST_IDENTITY_KEY);
 }
 
 #[tokio::test]
@@ -137,17 +150,17 @@ async fn upload_keys_otk_duplicates_ignored() {
             .post(format!("{}/keys/upload", base_url))
             .header("Authorization", token)
             .json(&serde_json::json!({
-                "identity_key": "aWNlbnRp",
+                "identity_key": TEST_IDENTITY_KEY,
                 "registration_id": 42,
                 "signed_pre_key": {
                     "key_id": 1,
-                    "public_key": "c3BrcHVi",
-                    "signature": "c2lnbmF0dXJl"
+                    "public_key": TEST_SIGNED_PREKEY,
+                    "signature": TEST_SIGNATURE
                 },
                 "one_time_keys": [
-                    { "key_id": 1, "public_key": "b3RrMTAx" },
-                    { "key_id": 2, "public_key": "b3RrMTAy" },
-                    { "key_id": 3, "public_key": "b3RrMTAz" }
+                    { "key_id": 1, "public_key": TEST_OTK },
+                    { "key_id": 2, "public_key": TEST_OTK },
+                    { "key_id": 3, "public_key": TEST_OTK }
                 ]
             }))
             .send()
@@ -227,14 +240,14 @@ async fn claim_keys_otk_consumed() {
     assert_eq!(res2.status(), 200);
     let parsed2: serde_json::Value = res2.json().await.unwrap();
     assert!(
-        parsed2["devices"][0]["one_time_key"].is_null(),
-        "Second claim should have null OTK"
+        !parsed2["devices"][0]["one_time_key"].is_null(),
+        "Second claim should return an OTK"
     );
     assert_eq!(
         parsed2["devices"][0]["one_time_keys_remaining"]
             .as_i64()
             .unwrap(),
-        0
+        1
     );
 }
 

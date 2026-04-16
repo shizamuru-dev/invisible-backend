@@ -262,7 +262,8 @@ pub async fn claim_keys(
     let device_ids_count = device_ids.len() as i64;
 
     let otk_rows = sqlx::query(
-        "DELETE FROM device_one_time_keys
+        "UPDATE device_one_time_keys
+         SET consumed = TRUE
          WHERE id IN (
              SELECT id FROM device_one_time_keys
              WHERE device_id = ANY($1) AND consumed = FALSE

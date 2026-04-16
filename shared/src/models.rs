@@ -127,5 +127,6 @@ pub enum DatabaseEvent {
     },
     ReadReceipt {
         message_id: String,
+        reader: String,
     },
 }

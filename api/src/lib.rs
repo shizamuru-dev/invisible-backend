@@ -118,6 +118,13 @@ pub fn create_router(state: AppState) -> Router {
         .route("/keys/devices/{device_id}", delete(e2ee::delete_device))
         .route("/files/presign", get(presign_handler))
         .route("/files/download/{file_id}", get(download_handler))
+        .route("/api/dialogs", get(dialogs_handler))
+        .route(
+            "/api/dialogs/{peer}/read-state",
+            get(get_read_state_handler),
+        )
+        .route("/api/dialogs/{peer}/read", post(mark_read_handler))
+        .route("/api/messages/{username}", get(messages_handler))
         .with_state(state)
 }
 
@@ -319,6 +326,397 @@ async fn download_handler(
     Path(file_id): Path<String>,
 ) -> impl IntoResponse {
     (StatusCode::OK, format!("file: {}", file_id))
+}
+
+#[derive(Serialize)]
+struct DialogResponse {
+    peer: String,
+    last_message_id: Option<String>,
+    last_message_content: Option<String>,
+    last_message_time: Option<chrono::DateTime<Utc>>,
+    unread_count: i32,
+}
+
+async fn dialogs_handler(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+) -> impl IntoResponse {
+    let username = &user.0.sub;
+
+    #[derive(Debug, sqlx::FromRow)]
+    #[allow(dead_code)]
+    struct DialogRow {
+        peer: String,
+        last_message_id: Option<uuid::Uuid>,
+        last_message_content: Option<String>,
+        last_message_time: Option<chrono::DateTime<chrono::Utc>>,
+        last_read_message_id: Option<uuid::Uuid>,
+        unread_count: Option<i32>,
+    }
+
+    let username = username.clone();
+
+    let dialogs = sqlx::query_as::<_, DialogRow>(
+        r#"
+        WITH dialogs_with_last_message AS (
+            SELECT DISTINCT ON (LEAST(sender_username, recipient_username), GREATEST(sender_username, recipient_username))
+                CASE WHEN sender_username = $1 THEN recipient_username ELSE sender_username END as peer,
+                id as last_message_id,
+                content as last_message_content,
+                created_at as last_message_time,
+                sender_username,
+                recipient_username
+            FROM messages
+            WHERE sender_username = $1 OR recipient_username = $1
+            ORDER BY LEAST(sender_username, recipient_username), GREATEST(sender_username, recipient_username), created_at DESC
+        ),
+        unread_counts AS (
+            SELECT
+                d.peer,
+                COALESCE(
+                    CASE WHEN drs.last_read_message_id IS NOT NULL THEN
+                        (SELECT COUNT(*) FROM messages m
+                         WHERE m.sender_username = d.peer
+                         AND m.recipient_username = $1
+                         AND m.id > drs.last_read_message_id)
+                    ELSE
+                        (SELECT COUNT(*) FROM messages m
+                         WHERE m.sender_username = d.peer
+                         AND m.recipient_username = $1)
+                    END,
+                    0
+                )::integer as unread_count
+            FROM dialogs_with_last_message d
+            LEFT JOIN dialog_read_states drs ON drs.user_username = $1 AND drs.peer_username = d.peer
+        )
+        SELECT
+            d.peer,
+            d.last_message_id,
+            d.last_message_content,
+            d.last_message_time,
+            drs.last_read_message_id,
+            uc.unread_count
+        FROM dialogs_with_last_message d
+        LEFT JOIN dialog_read_states drs ON drs.user_username = $1 AND drs.peer_username = d.peer
+        LEFT JOIN unread_counts uc ON uc.peer = d.peer
+        ORDER BY d.last_message_time DESC NULLS LAST
+        "#,
+    )
+    .bind(&username)
+    .fetch_all(&state.db)
+    .await;
+
+    match dialogs {
+        Ok(rows) => {
+            let result: Vec<DialogResponse> = rows
+                .into_iter()
+                .map(|r| DialogResponse {
+                    peer: r.peer,
+                    last_message_id: r.last_message_id.map(|id| id.to_string()),
+                    last_message_content: r.last_message_content,
+                    last_message_time: r.last_message_time,
+                    unread_count: r.unread_count.unwrap_or(0),
+                })
+                .collect();
+
+            Json(result).into_response()
+        }
+        Err(e) => {
+            error!("Failed to fetch dialogs: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct MessagesQuery {
+    after: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct MessageResponse {
+    id: String,
+    from: String,
+    content: Option<String>,
+    message_type: String,
+    created_at: chrono::DateTime<Utc>,
+}
+
+async fn messages_handler(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(peer): Path<String>,
+    Query(params): Query<MessagesQuery>,
+) -> impl IntoResponse {
+    let username = &user.0.sub;
+    let limit = params.limit.unwrap_or(50).min(100);
+    let after_id = params
+        .after
+        .as_ref()
+        .and_then(|id| Uuid::parse_str(id).ok());
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct MessageRow {
+        id: uuid::Uuid,
+        sender_username: String,
+        content: Option<String>,
+        message_type: String,
+        created_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let messages = if let Some(after) = after_id {
+        sqlx::query_as::<_, MessageRow>(
+            "SELECT id, sender_username, content, message_type, created_at FROM messages WHERE ((sender_username = $1 AND recipient_username = $2) OR (sender_username = $2 AND recipient_username = $1)) AND id > $3 ORDER BY created_at ASC LIMIT $4"
+        )
+        .bind(&peer)
+        .bind(username)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await
+    } else {
+        sqlx::query_as::<_, MessageRow>(
+            "SELECT id, sender_username, content, message_type, created_at FROM messages WHERE (sender_username = $1 AND recipient_username = $2) OR (sender_username = $2 AND recipient_username = $1) ORDER BY created_at DESC LIMIT $3"
+        )
+        .bind(&peer)
+        .bind(username)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await
+    };
+
+    match messages {
+        Ok(rows) => {
+            let result: Vec<MessageResponse> = rows
+                .into_iter()
+                .map(|r| MessageResponse {
+                    id: r.id.to_string(),
+                    from: r.sender_username,
+                    content: r.content,
+                    message_type: r.message_type,
+                    created_at: r.created_at,
+                })
+                .collect();
+
+            Json(result).into_response()
+        }
+        Err(e) => {
+            error!("Failed to fetch messages: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ReadStateResponse {
+    peer: String,
+    last_read_message_id: Option<String>,
+    unread_count: i32,
+    updated_at: Option<chrono::DateTime<Utc>>,
+}
+
+async fn get_read_state_handler(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(peer): Path<String>,
+) -> impl IntoResponse {
+    let username = &user.0.sub;
+
+    #[derive(Debug, sqlx::FromRow)]
+    #[allow(dead_code)]
+    struct ReadStateRow {
+        last_read_message_id: Option<uuid::Uuid>,
+        unread_count: Option<i32>,
+        updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
+
+    let result = sqlx::query_as::<_, ReadStateRow>(
+        r#"
+        SELECT drs.last_read_message_id, drs.unread_count, drs.updated_at
+        FROM dialog_read_states drs
+        WHERE drs.user_username = $1 AND drs.peer_username = $2
+        "#,
+    )
+    .bind(username)
+    .bind(&peer)
+    .fetch_optional(&state.db)
+    .await;
+
+    match result {
+        Ok(Some(row)) => {
+            let unread = if let Some(last_read) = row.last_read_message_id {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM messages WHERE sender_username = $1 AND recipient_username = $2 AND id > $3"
+                )
+                .bind(&peer)
+                .bind(username)
+                .bind(last_read)
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or(0)
+            } else {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM messages WHERE sender_username = $1 AND recipient_username = $2"
+                )
+                .bind(&peer)
+                .bind(username)
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or(0)
+            };
+
+            Json(ReadStateResponse {
+                peer,
+                last_read_message_id: row.last_read_message_id.map(|id| id.to_string()),
+                unread_count: unread as i32,
+                updated_at: row.updated_at,
+            })
+            .into_response()
+        }
+        Ok(None) => {
+            let unread = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM messages WHERE sender_username = $1 AND recipient_username = $2"
+            )
+            .bind(&peer)
+            .bind(username)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+
+            Json(ReadStateResponse {
+                peer,
+                last_read_message_id: None,
+                unread_count: unread as i32,
+                updated_at: None,
+            })
+            .into_response()
+        }
+        Err(e) => {
+            error!("Failed to fetch read state: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct MarkReadQuery {
+    message_id: Option<String>,
+}
+
+async fn mark_read_handler(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+    Path(peer): Path<String>,
+    Query(params): Query<MarkReadQuery>,
+) -> impl IntoResponse {
+    let username = &user.0.sub;
+
+    if let Some(msg_id) = &params.message_id {
+        if let Ok(msg_uuid) = Uuid::parse_str(msg_id) {
+            #[derive(Debug, sqlx::FromRow)]
+            struct MessageRow {
+                sender_username: String,
+            }
+
+            let msg = sqlx::query_as::<_, MessageRow>(
+                "SELECT sender_username FROM messages WHERE id = $1",
+            )
+            .bind(msg_uuid)
+            .fetch_optional(&state.db)
+            .await;
+
+            match msg {
+                Ok(Some(row)) => {
+                    if row.sender_username != peer {
+                        return (StatusCode::BAD_REQUEST, "Message is not from this peer")
+                            .into_response();
+                    }
+
+                    let result = sqlx::query(
+                        r#"
+                        INSERT INTO dialog_read_states (user_username, peer_username, last_read_message_id, unread_count, updated_at)
+                        VALUES ($1, $2, $3, 0, NOW())
+                        ON CONFLICT (user_username, peer_username)
+                        DO UPDATE SET last_read_message_id = $3, unread_count = 0, updated_at = NOW()
+                        "#
+                    )
+                    .bind(username)
+                    .bind(&peer)
+                    .bind(msg_uuid)
+                    .execute(&state.db)
+                    .await;
+
+                    match result {
+                        Ok(_) => {
+                            sqlx::query("UPDATE messages SET read_at = NOW() WHERE id = $1 AND read_at IS NULL")
+                                .bind(msg_uuid)
+                                .execute(&state.db)
+                                .await
+                                .ok();
+
+                            (StatusCode::OK, "Marked as read").into_response()
+                        }
+                        Err(e) => {
+                            error!("Failed to update read state: {}", e);
+                            (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+                        }
+                    }
+                }
+                Ok(None) => (StatusCode::NOT_FOUND, "Message not found").into_response(),
+                Err(e) => {
+                    error!("Failed to fetch message: {}", e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+                }
+            }
+        } else {
+            (StatusCode::BAD_REQUEST, "Invalid message ID format").into_response()
+        }
+    } else {
+        let last_msg: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT id FROM messages WHERE sender_username = $1 AND recipient_username = $2 ORDER BY created_at DESC LIMIT 1"
+        )
+        .bind(&peer)
+        .bind(username)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+
+        if let Some(msg_uuid) = last_msg {
+            let result = sqlx::query(
+                r#"
+                INSERT INTO dialog_read_states (user_username, peer_username, last_read_message_id, unread_count, updated_at)
+                VALUES ($1, $2, $3, 0, NOW())
+                ON CONFLICT (user_username, peer_username)
+                DO UPDATE SET last_read_message_id = $3, unread_count = 0, updated_at = NOW()
+                "#
+            )
+            .bind(username)
+            .bind(&peer)
+            .bind(msg_uuid)
+            .execute(&state.db)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    sqlx::query("UPDATE messages SET read_at = NOW() WHERE sender_username = $1 AND recipient_username = $2 AND read_at IS NULL")
+                        .bind(&peer)
+                        .bind(username)
+                        .execute(&state.db)
+                        .await
+                        .ok();
+
+                    (StatusCode::OK, "Marked all as read").into_response()
+                }
+                Err(e) => {
+                    error!("Failed to update read state: {}", e);
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+                }
+            }
+        } else {
+            (StatusCode::OK, "No messages to mark as read").into_response()
+        }
+    }
 }
 
 pub async fn logout_handler(
