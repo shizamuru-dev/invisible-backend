@@ -6,11 +6,14 @@ pub async fn create_test_pool() -> PgPool {
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         "postgres://invisible:password@127.0.0.1:5432/invisible_chat".to_string()
     });
-    sqlx::postgres::PgPoolOptions::new()
+    let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(&database_url)
         .await
-        .unwrap()
+        .unwrap();
+
+    sqlx::migrate!("../migrations").run(&pool).await.unwrap();
+    pool
 }
 
 pub async fn create_test_user_with_session() -> (PgPool, String, String, String) {
