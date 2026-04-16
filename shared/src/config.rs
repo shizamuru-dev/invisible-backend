@@ -42,9 +42,25 @@ impl AppConfig {
     pub fn load() -> Result<Self, Box<figment::Error>> {
         let _ = dotenvy::dotenv();
 
-        Figment::from(Serialized::defaults(AppConfig::default()))
+        let config: Self = Figment::from(Serialized::defaults(AppConfig::default()))
             .merge(Env::raw()) // e.g. JWT_SECRET, DATABASE_URL directly
             .extract()
-            .map_err(Box::new)
+            .map_err(Box::new)?;
+
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<(), Box<figment::Error>> {
+        #[cfg(not(debug_assertions))]
+        {
+            if self.jwt_secret == "super-secret-key-for-dev" {
+                return Err("JWT_SECRET must be explicitly set in production".into());
+            }
+            if self.s3_access_key == "minioadmin" && self.s3_secret_key == "minioadmin" {
+                return Err("S3 credentials must be explicitly set in production".into());
+            }
+        }
+        Ok(())
     }
 }

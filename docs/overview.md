@@ -22,46 +22,57 @@ The project is organized into multiple crates:
 
 ## Prerequisites & Setup
 
-To start the infrastructure, run:
+Requires Docker and Docker Compose. Clone the repository and start everything with:
 
 ```bash
-docker-compose up -d postgres redis minio minio-init
+docker compose up -d
 ```
 
-This will start PostgreSQL, Redis, and MinIO.
+This will build Rust services and start all containers: PostgreSQL, Redis, MinIO, API, and Relay.
 
 ## Configuration
 
-The project uses `figment` for configuration management. Configuration values are loaded from:
-1. Default values defined in the code (`AppConfig::default()`).
-2. A `.env` file at the root of the workspace.
-3. System environment variables (e.g., `DATABASE_URL`, `JWT_SECRET`).
+The project uses `figment` for configuration. Configuration is loaded from:
+1. Default values in code (`AppConfig::default()`)
+2. Environment variables (overrides defaults)
 
-Example `.env` file:
-```env
-DATABASE_URL=postgres://invisible:password@127.0.0.1:5432/invisible_chat
-REDIS_URL=redis://127.0.0.1:6379/
-JWT_SECRET=super-secret-key-for-dev
-```
+Environment variables for Docker Compose are defined in `docker-compose.yml`:
+- `DATABASE_URL` — PostgreSQL connection string
+- `REDIS_URL` — Redis connection string
+- `JWT_SECRET` — JWT signing key (change for production!)
+- `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` — MinIO settings
 
 ## Database Migrations
 
-The project uses `sqlx-cli` for database migrations. The migrations are located in the `migrations/` directory and are automatically applied when the `api` or `relay` services start.
+Migrations are in `migrations/` directory and run automatically when services start.
 
 ## Running the Services
 
+With Docker:
 ```bash
-# Start the relay server
-cargo run --bin relay
+docker compose up -d        # Start all services
+docker compose logs -f      # Follow logs
+docker compose down         # Stop all services
+```
 
-# Start the api server
-cargo run --bin api
+Without Docker (local development):
+```bash
+# Requires PostgreSQL, Redis, MinIO running locally
+cargo run --bin relay       # Start relay server
+cargo run --bin api         # Start API server
 ```
 
 ## Testing
 
-Integration tests require a running PostgreSQL and Redis instance. They will automatically run the migrations against the test database. Tests should be run with a single thread to avoid data conflicts between concurrent test cases:
-
+**Rust Integration Tests:**
 ```bash
-cargo test --all -- --test-threads=1
+cargo test --workspace -- --test-threads=1
 ```
+
+**Node.js API Tests** (requires running services):
+```bash
+cd test_tool && npm install
+API_URL=http://localhost:3001 RELAY_WS_URL=ws://localhost:3030 npm run test:all
+```
+
+**GitHub Actions CI** runs both on every PR (fmt → clippy → test → integration).

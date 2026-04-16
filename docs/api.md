@@ -2,12 +2,12 @@
 
 ## WebSocket API
 
-**URL:** `ws://localhost:3030/ws`
+**URL:** `ws://localhost:3030`
 
 ### Connection
 
-To connect, you must provide a valid JWT token in the `token` query parameter.
-`ws://localhost:3030/ws?token=eyJhbGci...`
+To connect, provide a valid JWT token in the `token` query parameter:
+`ws://localhost:3030?token=eyJhbGci...`
 
 The server decodes the token using the `JWT_SECRET` and extracts the `sub` claim as the user's ID. If the token is missing, invalid, or expired, the WebSocket connection is rejected with `401 Unauthorized`.
 

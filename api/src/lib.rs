@@ -16,7 +16,7 @@ use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use tracing::error;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 pub use shared::models::Claims;
@@ -60,6 +60,11 @@ where
                     token_from_query = Some(t.to_string());
                     break;
                 }
+            }
+            if token_from_query.is_some() {
+                warn!(
+                    "Using URL token authentication - consider using Authorization header for production"
+                );
             }
             token_from_query.ok_or((StatusCode::UNAUTHORIZED, "Missing authorization token"))?
         };
