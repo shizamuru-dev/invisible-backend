@@ -17,6 +17,11 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode}
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tracing::{error, warn};
+
+const USERNAME_MIN_LEN: usize = 3;
+const USERNAME_MAX_LEN: usize = 32;
+const PASSWORD_MIN_LEN: usize = 8;
+
 use uuid::Uuid;
 
 pub use shared::models::Claims;
@@ -120,6 +125,31 @@ async fn register_handler(
     State(state): State<AppState>,
     Json(payload): Json<AuthRequest>,
 ) -> impl IntoResponse {
+    let username = payload.username.trim();
+    if username.len() < USERNAME_MIN_LEN || username.len() > USERNAME_MAX_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Username must be {} to {} characters",
+                USERNAME_MIN_LEN, USERNAME_MAX_LEN
+            ),
+        )
+            .into_response();
+    }
+    if !username.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Username can only contain letters, numbers, and underscores",
+        )
+            .into_response();
+    }
+    if payload.password.len() < PASSWORD_MIN_LEN {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("Password must be at least {} characters", PASSWORD_MIN_LEN),
+        )
+            .into_response();
+    }
     if payload.username.is_empty() || payload.password.is_empty() {
         return (
             StatusCode::BAD_REQUEST,

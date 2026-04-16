@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -17,6 +17,13 @@ const CURVE25519_SIGNATURE_LEN: usize = 64;
 const MAX_KEYS_PER_REQUEST: usize = 100;
 const MAX_KEY_ID: i64 = 1_000_000;
 const MAX_REGISTRATION_ID: i64 = 16380;
+const MAX_DEVICES_PER_CLAIM: i64 = 100;
+
+#[derive(Deserialize)]
+pub struct ClaimKeysQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
 
 fn validate_base64_key(key: &str, expected_len: usize) -> Result<Vec<u8>, &'static str> {
     let decoded = URL_SAFE_NO_PAD
@@ -215,17 +222,27 @@ pub async fn claim_keys(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
     Path(target_username): Path<String>,
+    Query(params): Query<ClaimKeysQuery>,
 ) -> impl IntoResponse {
     use sqlx::Row;
+
+    let limit = params
+        .limit
+        .unwrap_or(MAX_DEVICES_PER_CLAIM)
+        .min(MAX_DEVICES_PER_CLAIM);
+    let offset = params.offset.unwrap_or(0).max(0);
 
     let identity_keys = sqlx::query(
         "SELECT d.device_id, d.identity_key, d.registration_id,
                 spk.key_id AS spk_key_id, spk.public_key AS spk_public_key, spk.signature AS spk_signature
          FROM device_identity_keys d
          JOIN device_signed_pre_keys spk ON spk.device_id = d.device_id
-         WHERE d.user_username = $1",
+         WHERE d.user_username = $1
+         LIMIT $2 OFFSET $3",
     )
     .bind(&target_username)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await;
 
