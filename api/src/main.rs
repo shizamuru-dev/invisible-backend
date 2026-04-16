@@ -12,6 +12,7 @@ use axum::{
 };
 use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+
 use s3::Bucket;
 use s3::Region;
 use s3::creds::Credentials;
@@ -49,10 +50,13 @@ struct AuthResponse {
 
 use shared::models::Claims;
 
+mod worker;
+
 #[derive(Clone)]
 struct AppState {
     db: PgPool,
     jwt_secret: String,
+    redis_client: redis::Client,
 }
 
 pub struct AuthenticatedUser(pub Claims);
@@ -132,7 +136,18 @@ async fn main() -> Result<()> {
         .init();
 
     info!("Connecting to PostgreSQL...");
-    let db = shared::db::init_postgres().await?;
+    let db = shared::db::init_postgres(&shared::config::AppConfig::load().unwrap()).await?;
+
+    info!("Connecting to Redis...");
+    let config = shared::config::AppConfig::load().unwrap();
+    let redis_client = redis::Client::open(config.redis_url.clone())?;
+
+    // Start background worker for message events
+    let worker_db = db.clone();
+    let worker_redis = redis_client.clone();
+    tokio::spawn(async move {
+        worker::start_database_worker(worker_db, worker_redis).await;
+    });
 
     // Create users table
     sqlx::query(
@@ -149,12 +164,17 @@ async fn main() -> Result<()> {
     let jwt_secret =
         std::env::var("JWT_SECRET").unwrap_or_else(|_| "super-secret-key-for-dev".to_string());
 
-    let state = AppState { db, jwt_secret };
+    let state = AppState {
+        db,
+        jwt_secret,
+        redis_client: redis_client.clone(),
+    };
 
     let app = Router::new()
         .route("/health", get(|| async { "API server is alive" }))
         .route("/api/auth/register", post(register_handler))
         .route("/api/auth/login", post(login_handler))
+        .route("/api/auth/logout", post(logout_handler))
         .route("/files/presign", get(presign_handler))
         .route("/files/download/{file_id}", get(download_handler))
         .with_state(state);
@@ -246,6 +266,25 @@ async fn login_handler(
         return (StatusCode::UNAUTHORIZED, "Invalid username or password").into_response();
     }
 
+    let session_id = Uuid::new_v4().to_string();
+
+    // Insert session into DB
+    let _ = sqlx::query(
+        "INSERT INTO sessions (id, user_username, refresh_token, is_valid) VALUES ($1, $2, $3, true)",
+    )
+    .bind(Uuid::parse_str(&session_id).unwrap())
+    .bind(payload.username.clone())
+    .bind(Uuid::new_v4().to_string())
+    .execute(&state.db)
+    .await;
+
+    // Put session in Redis
+    if let Ok(mut conn) = state.redis_client.get_multiplexed_async_connection().await {
+        use redis::AsyncCommands;
+        let session_key = format!("session:{}", session_id);
+        let _: redis::RedisResult<()> = conn.set_ex(session_key, "valid", 30 * 24 * 60 * 60).await;
+    }
+
     let expiration = Utc::now()
         .checked_add_signed(Duration::days(7))
         .expect("valid timestamp")
@@ -253,6 +292,7 @@ async fn login_handler(
 
     let claims = Claims {
         sub: payload.username.clone(),
+        session_id: session_id.clone(),
         exp: expiration as usize,
     };
 
@@ -317,4 +357,28 @@ async fn download_handler(
                 .into_response()
         }
     }
+}
+
+async fn logout_handler(
+    State(state): State<AppState>,
+    user: AuthenticatedUser,
+) -> impl IntoResponse {
+    let session_id = user.0.session_id;
+
+    // Invalidate in PostgreSQL
+    if let Ok(uuid) = Uuid::parse_str(&session_id) {
+        let _ = sqlx::query("UPDATE sessions SET is_valid = false WHERE id = $1")
+            .bind(uuid)
+            .execute(&state.db)
+            .await;
+    }
+
+    // Invalidate in Redis
+    if let Ok(mut conn) = state.redis_client.get_multiplexed_async_connection().await {
+        use redis::AsyncCommands;
+        let session_key = format!("session:{}", session_id);
+        let _: redis::RedisResult<()> = conn.del(session_key).await;
+    }
+
+    (StatusCode::OK, "Logged out successfully").into_response()
 }

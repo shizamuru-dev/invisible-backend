@@ -1,6 +1,6 @@
 use anyhow::Result;
 use tracing::info;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use shared::repository::{
     PgOfflineMessageRepository, RedisPresenceRepository, RedisPubSubRepository,
@@ -9,45 +9,62 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let config = match shared::config::AppConfig::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to load configuration: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "invisible_backend=debug,relay=debug,shared=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    if let Some(loki_url_str) = &config.loki_url {
+        let loki_url = url::Url::parse(loki_url_str)?;
+        let (loki_layer, loki_task) = tracing_loki::builder()
+            .label("service", "relay")?
+            .build_url(loki_url)?;
+
+        tokio::spawn(loki_task);
+        let boxed_loki = loki_layer.boxed();
+
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "invisible_backend=debug,relay=debug,shared=debug".into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .with(boxed_loki)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "invisible_backend=debug,relay=debug,shared=debug".into()),
+            )
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     // Initialize databases
-    let pg_pool = shared::db::init_postgres().await?;
-    let (redis_client, redis_manager) = shared::db::init_redis().await?;
+    let pg_pool = shared::db::init_postgres(&config).await?;
+    let (redis_client, redis_manager) = shared::db::init_redis(&config).await?;
 
-    // Create table if it doesn't exist
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS offline_messages (
-            id SERIAL PRIMARY KEY,
-            to_user VARCHAR NOT NULL,
-            payload JSONB NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );",
-    )
-    .execute(&pg_pool)
-    .await?;
+    tracing::info!("Running database migrations...");
+    sqlx::migrate!("../migrations").run(&pg_pool).await?;
 
     info!("Database initialized");
 
     let offline_repo = Arc::new(PgOfflineMessageRepository::new(pg_pool.clone()));
     let pubsub_repo = Arc::new(RedisPubSubRepository::new(redis_manager.clone()));
     let presence_repo = Arc::new(RedisPresenceRepository::new(redis_manager));
-    let jwt_secret =
-        std::env::var("JWT_SECRET").unwrap_or_else(|_| "super-secret-key-for-dev".to_string());
 
     let app = relay::app(
+        pg_pool,
         offline_repo,
         redis_client,
         pubsub_repo,
         presence_repo,
-        jwt_secret,
+        config.jwt_secret,
     );
 
     let addr = "0.0.0.0:3030";

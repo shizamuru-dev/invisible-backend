@@ -10,7 +10,17 @@ pub struct WsQuery {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
     pub sub: String,
+    pub session_id: String,
     pub exp: usize,
+}
+
+/// Device info provided on login
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeviceInfo {
+    pub device_name: String,
+    pub device_model: String,
+    pub platform: String,
+    pub hwid: String,
 }
 
 /// Message format expected from the client
@@ -34,6 +44,10 @@ pub enum IncomingMessage {
     },
     WatchPresence {
         user_ids: Vec<String>,
+    },
+    ReadReceipt {
+        to: String,
+        message_id: String,
     },
 }
 
@@ -60,8 +74,29 @@ pub enum OutgoingMessage {
         to: String,
         message_id: String,
     },
+    ReadReceipt {
+        from: String,
+        message_id: String,
+    },
     PresenceUpdate {
         user_id: String,
         is_online: bool,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum DatabaseEvent {
+    NewMessage {
+        id: String,
+        sender: String,
+        recipient: String,
+        message_type: String,
+        content: Option<String>,
+        file_name: Option<String>,
+        mime_type: Option<String>,
+        file_url: Option<String>,
+    },
+    ReadReceipt {
+        message_id: String,
     },
 }

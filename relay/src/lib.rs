@@ -10,8 +10,10 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use jsonwebtoken::{DecodingKey, Validation, decode};
+use redis::AsyncCommands;
 use shared::models::{Claims, IncomingMessage, OutgoingMessage, WsQuery};
 use shared::repository::{OfflineMessageRepository, PresenceRepository, PubSubRepository};
+use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
@@ -19,6 +21,8 @@ use uuid::Uuid;
 
 /// Shared application state
 pub struct AppState {
+    /// Postgres connection pool
+    pub pg_pool: PgPool,
     /// Repository for offline messages
     pub offline_repo: Arc<dyn OfflineMessageRepository>,
     /// Redis client for creating PubSub connections
@@ -33,6 +37,7 @@ pub struct AppState {
 
 /// Creates the router for the relay server
 pub fn app(
+    pg_pool: PgPool,
     offline_repo: Arc<dyn OfflineMessageRepository>,
     redis_client: redis::Client,
     pubsub_repo: Arc<dyn PubSubRepository>,
@@ -40,6 +45,7 @@ pub fn app(
     jwt_secret: String,
 ) -> Router {
     let app_state = Arc::new(AppState {
+        pg_pool,
         offline_repo,
         redis_client,
         pubsub_repo,
@@ -72,6 +78,69 @@ pub async fn ws_handler(
     };
 
     let user_id = claims.sub;
+
+    let session_id = match Uuid::parse_str(&claims.session_id) {
+        Ok(id) => id,
+        Err(_) => return (StatusCode::UNAUTHORIZED, "Invalid session ID format").into_response(),
+    };
+
+    let session_key = format!("session:{}", session_id);
+    let mut redis_conn = match state.redis_client.get_multiplexed_async_connection().await {
+        Ok(conn) => conn,
+        Err(_) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Redis connection error").into_response();
+        }
+    };
+
+    // 1. Check Redis cache first
+    let cached_session: Option<String> = redis_conn.get(&session_key).await.unwrap_or(None);
+
+    let is_valid = if cached_session.is_some() {
+        // Update TTL
+        let _: () = redis_conn
+            .expire(&session_key, 30 * 24 * 60 * 60)
+            .await
+            .unwrap_or(());
+        true
+    } else {
+        // 2. Cache miss, check PostgreSQL
+        let session_valid: Option<bool> =
+            match sqlx::query_scalar("SELECT is_valid FROM sessions WHERE id = $1")
+                .bind(session_id)
+                .fetch_optional(&state.pg_pool)
+                .await
+            {
+                Ok(v) => v,
+                Err(_) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+                }
+            };
+
+        if session_valid == Some(true) {
+            // Populate cache
+            let _: () = redis_conn
+                .set_ex(&session_key, user_id.clone(), 30 * 24 * 60 * 60)
+                .await
+                .unwrap_or(());
+            true
+        } else {
+            false
+        }
+    };
+
+    if !is_valid {
+        return (StatusCode::UNAUTHORIZED, "Session invalid or expired").into_response();
+    }
+
+    // Optionally update last accessed for the session in DB
+    let pg_pool = state.pg_pool.clone();
+    tokio::spawn(async move {
+        let _ =
+            sqlx::query("UPDATE sessions SET last_accessed_at = CURRENT_TIMESTAMP WHERE id = $1")
+                .bind(session_id)
+                .execute(&pg_pool)
+                .await;
+    });
 
     ws.on_upgrade(move |socket| handle_socket(socket, user_id, state))
 }
@@ -186,8 +255,9 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
             if let Message::Text(text) = msg {
                 match serde_json::from_str::<IncomingMessage>(&text) {
                     Ok(parsed_msg) => {
-                        let (is_deliverable, to, id, outgoing) = match parsed_msg {
+                        let (requires_receipt, store_offline, to, id, outgoing) = match parsed_msg {
                             IncomingMessage::Text { to, id, content } => (
+                                true,
                                 true,
                                 to,
                                 id.clone(),
@@ -205,6 +275,7 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
                                 file_url,
                             } => (
                                 true,
+                                true,
                                 to,
                                 id.clone(),
                                 OutgoingMessage::File {
@@ -215,7 +286,18 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
                                     file_url,
                                 },
                             ),
+                            IncomingMessage::ReadReceipt { to, message_id } => (
+                                false,
+                                true,
+                                to,
+                                String::new(),
+                                OutgoingMessage::ReadReceipt {
+                                    from: current_user_id.clone(),
+                                    message_id,
+                                },
+                            ),
                             IncomingMessage::Typing { to } => (
+                                false,
                                 false,
                                 to,
                                 String::new(),
@@ -260,6 +342,76 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
                             }
                         };
 
+                        // Save message to history asynchronously via Redis
+                        let redis_conn = match state_clone
+                            .redis_client
+                            .get_multiplexed_async_connection()
+                            .await
+                        {
+                            Ok(c) => Some(c),
+                            Err(e) => {
+                                error!(
+                                    "Failed to get redis connection for queueing message: {}",
+                                    e
+                                );
+                                None
+                            }
+                        };
+
+                        if let Some(mut r) = redis_conn {
+                            let db_event = match &outgoing {
+                                OutgoingMessage::Text { from, id, content } => {
+                                    Some(shared::models::DatabaseEvent::NewMessage {
+                                        id: id.clone(),
+                                        sender: from.clone(),
+                                        recipient: to.clone(),
+                                        message_type: "text".to_string(),
+                                        content: Some(content.clone()),
+                                        file_name: None,
+                                        mime_type: None,
+                                        file_url: None,
+                                    })
+                                }
+                                OutgoingMessage::File {
+                                    from,
+                                    id,
+                                    file_name,
+                                    mime_type,
+                                    file_url,
+                                } => Some(shared::models::DatabaseEvent::NewMessage {
+                                    id: id.clone(),
+                                    sender: from.clone(),
+                                    recipient: to.clone(),
+                                    message_type: "file".to_string(),
+                                    content: None,
+                                    file_name: Some(file_name.clone()),
+                                    mime_type: Some(mime_type.clone()),
+                                    file_url: Some(file_url.clone()),
+                                }),
+                                OutgoingMessage::ReadReceipt { message_id, .. } => {
+                                    Some(shared::models::DatabaseEvent::ReadReceipt {
+                                        message_id: message_id.clone(),
+                                    })
+                                }
+                                _ => None,
+                            };
+
+                            if let Some(event) = db_event
+                                && let Ok(json) = serde_json::to_string(&event)
+                            {
+                                let _: () = redis::cmd("XADD")
+                                    .arg("message_events")
+                                    .arg("*")
+                                    .arg("event")
+                                    .arg(json)
+                                    .query_async(&mut r)
+                                    .await
+                                    .unwrap_or_else(|e: redis::RedisError| {
+                                        error!("Failed to xadd message_events to Redis: {}", e);
+                                    });
+                            }
+                        }
+
                         if let Ok(json_str) = serde_json::to_string(&outgoing) {
                             let channel = format!("user:{}", to);
 
@@ -272,10 +424,10 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
 
                             if receivers > 0 {
                                 // Delivered successfully via Redis, send delivery receipt to sender if needed
-                                if is_deliverable {
+                                if requires_receipt {
                                     let receipt = OutgoingMessage::DeliveryReceipt {
                                         to: to.clone(),
-                                        message_id: id,
+                                        message_id: id.clone(),
                                     };
                                     if let Ok(receipt_json) = serde_json::to_string(&receipt) {
                                         // Sender is current_user_id, send to their channel
@@ -292,7 +444,7 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
                                         }
                                     }
                                 }
-                            } else if is_deliverable {
+                            } else if store_offline {
                                 // Nobody is subscribed, save to Postgres offline queue
                                 debug!("Recipient {} is offline. Queuing message {}", to, id);
                                 if let Ok(payload) = serde_json::to_value(&outgoing)

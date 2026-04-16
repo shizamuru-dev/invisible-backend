@@ -15,6 +15,7 @@ tower-http = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }
+redis = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
@@ -34,4 +35,6 @@ chrono = { workspace = true }
 sqlx = { workspace = true }
 
 rust-s3 = "0.37.1"
-uuid = { version = "1.23.0", features = ["v4"] }
+uuid = { version = "1.23.0", features = ["v4", "serde"] }
+tracing-loki = { version = "0.2.6", features = ["rustls"] }
+url = "2.5.8"

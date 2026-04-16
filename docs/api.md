@@ -45,6 +45,15 @@ Messages sent by the client must be JSON strings with the following formats:
 }
 ```
 
+#### Read Receipt
+```json
+{
+  "type": "ReadReceipt",
+  "to": "bob",
+  "message_id": "msg-123"
+}
+```
+
 #### Watch Presence
 ```json
 {
@@ -98,6 +107,17 @@ When a user successfully receives a text or file message, the server immediately
 }
 ```
 
+#### Read Receipt
+When the recipient opens the chat and reads the message, their client should send a ReadReceipt. The server forwards it to the original sender.
+
+```json
+{
+  "type": "ReadReceipt",
+  "from": "alice",
+  "message_id": "msg-123"
+}
+```
+
 #### Presence Update
 When users come online or go offline, or when initially requested.
 
@@ -132,7 +152,7 @@ Registers a new user in the system.
 - `409 Conflict`: Username already exists.
 
 #### `POST /api/auth/login`
-Authenticates a user and returns a JWT token.
+Authenticates a user and returns a session token. Also registers a new session in PostgreSQL and caches it in Redis.
 
 **Request Body (JSON):**
 ```json
@@ -146,10 +166,45 @@ Authenticates a user and returns a JWT token.
 - `200 OK`:
   ```json
   {
-    "token": "eyJ0eXAi... (JWT Token)"
+    "token": "eyJ0eXAi... (JWT Token valid for 7 days)"
   }
   ```
 - `401 Unauthorized`: Invalid username or password.
+
+#### `POST /api/auth/logout`
+Logs the user out of the current session, immediately invalidating the session in PostgreSQL and deleting it from the Redis cache. Requires Authentication.
+
+**Responses:**
+- `200 OK`: Successfully logged out.
+- `401 Unauthorized`: Missing, invalid, or expired token.
+
+### Sessions
+
+All session endpoints require authentication with a valid Access token.
+
+#### `GET /api/sessions`
+Retrieves a list of all active sessions for the current user.
+
+**Responses:**
+- `200 OK`:
+  ```json
+  [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "device_name": "Alice's iPhone",
+      "device_model": "iPhone 13 Pro",
+      "platform": "iOS",
+      "last_accessed_at": "2026-04-16T12:00:00Z"
+    }
+  ]
+  ```
+
+#### `DELETE /api/sessions/{session_id}`
+Revokes a specific session by its ID, immediately invalidating its refresh token.
+
+**Responses:**
+- `200 OK`: Successfully revoked.
+- `404 Not Found`: Session not found or belongs to another user.
 
 ### Files
 

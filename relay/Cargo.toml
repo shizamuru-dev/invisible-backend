@@ -34,6 +34,8 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { version = "1.23.0", features = ["v4"] }
+tracing-loki = { version = "0.2.6", features = ["rustls"] }
+url = "2.5.8"
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }

@@ -5,14 +5,56 @@ use shared::models::{Claims, IncomingMessage, OutgoingMessage};
 use shared::repository::{
     PgOfflineMessageRepository, RedisPresenceRepository, RedisPubSubRepository,
 };
+use sqlx::PgPool;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as TgMessage};
+use uuid::Uuid;
 
-fn generate_token(username: &str) -> String {
+async fn generate_token_and_session(username: &str, pg_pool: &PgPool) -> String {
+    let session_id = Uuid::new_v4();
+
+    // Run migrations first instead of manual table creation
+    sqlx::migrate!("../migrations").run(pg_pool).await.unwrap();
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sessions (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_username VARCHAR(255) REFERENCES users(username) ON DELETE CASCADE,
+            device_name VARCHAR(255),
+            device_model VARCHAR(255),
+            platform VARCHAR(255),
+            hwid VARCHAR(255),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            last_accessed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            is_valid BOOLEAN DEFAULT TRUE
+        );",
+    )
+    .execute(pg_pool)
+    .await
+    .unwrap();
+
+    // Insert dummy user if not exists
+    sqlx::query(
+        "INSERT INTO users (username, password_hash) VALUES ($1, 'test') ON CONFLICT DO NOTHING",
+    )
+    .bind(username)
+    .execute(pg_pool)
+    .await
+    .unwrap();
+
+    // Insert session
+    sqlx::query("INSERT INTO sessions (id, user_username) VALUES ($1, $2)")
+        .bind(session_id)
+        .bind(username)
+        .execute(pg_pool)
+        .await
+        .unwrap();
+
     let claims = Claims {
         sub: username.to_string(),
+        session_id: session_id.to_string(),
         exp: (sqlx::types::chrono::Utc::now().timestamp() + 3600) as usize,
     };
     encode(
@@ -24,7 +66,7 @@ fn generate_token(username: &str) -> String {
 }
 
 /// Helper function to start the server in the background and return its address
-async fn start_test_server() -> SocketAddr {
+async fn start_test_server() -> (SocketAddr, PgPool) {
     // For tests, use environment variables to connect to actual DBs
     unsafe {
         std::env::set_var(
@@ -34,21 +76,11 @@ async fn start_test_server() -> SocketAddr {
         std::env::set_var("REDIS_URL", "redis://127.0.0.1:6379/");
     }
 
-    let pg_pool = shared::db::init_postgres().await.unwrap();
-    let (redis_client, redis_manager) = shared::db::init_redis().await.unwrap();
+    let config = shared::config::AppConfig::load().unwrap_or_default();
+    let pg_pool = shared::db::init_postgres(&config).await.unwrap();
+    let (redis_client, redis_manager) = shared::db::init_redis(&config).await.unwrap();
 
-    // Create table if it doesn't exist
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS offline_messages (
-            id SERIAL PRIMARY KEY,
-            to_user VARCHAR NOT NULL,
-            payload JSONB NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );",
-    )
-    .execute(&pg_pool)
-    .await
-    .unwrap();
+    sqlx::migrate!("../migrations").run(&pg_pool).await.unwrap();
 
     let offline_repo = Arc::new(PgOfflineMessageRepository::new(pg_pool.clone()));
     let pubsub_repo = Arc::new(RedisPubSubRepository::new(redis_manager.clone()));
@@ -56,6 +88,7 @@ async fn start_test_server() -> SocketAddr {
     let jwt_secret = "test-secret".to_string();
 
     let app = app(
+        pg_pool.clone(),
         offline_repo,
         redis_client,
         pubsub_repo,
@@ -70,17 +103,19 @@ async fn start_test_server() -> SocketAddr {
         axum::serve(listener, app).await.unwrap();
     });
 
-    addr
+    (addr, pg_pool)
 }
 
 #[tokio::test]
 async fn given_two_users_when_one_sends_message_then_other_receives_it() {
-    let addr = start_test_server().await;
+    let (addr, pg_pool) = start_test_server().await;
 
-    let alice_url = format!("ws://{}/ws?token={}", addr, generate_token("alice"));
+    let alice_token = generate_token_and_session("alice", &pg_pool).await;
+    let alice_url = format!("ws://{}/ws?token={}", addr, alice_token);
     let (mut alice_ws, _) = connect_async(&alice_url).await.unwrap();
 
-    let bob_url = format!("ws://{}/ws?token={}", addr, generate_token("bob"));
+    let bob_token = generate_token_and_session("bob", &pg_pool).await;
+    let bob_url = format!("ws://{}/ws?token={}", addr, bob_token);
     let (mut bob_ws, _) = connect_async(&bob_url).await.unwrap();
 
     // Small delay to ensure Redis PubSub is active before sending messages
@@ -153,14 +188,41 @@ async fn given_two_users_when_one_sends_message_then_other_receives_it() {
     } else {
         panic!("Expected text message");
     }
+
+    // 3. Read Receipt
+    let read_incoming = IncomingMessage::ReadReceipt {
+        to: "alice".to_string(),
+        message_id: "msg-123".to_string(),
+    };
+    bob_ws
+        .send(TgMessage::Text(
+            serde_json::to_string(&read_incoming).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    let msg = alice_ws.next().await.unwrap().unwrap();
+    if let TgMessage::Text(text) = msg {
+        let outgoing: OutgoingMessage = serde_json::from_str(&text).unwrap();
+        match outgoing {
+            OutgoingMessage::ReadReceipt { from, message_id } => {
+                assert_eq!(from, "bob");
+                assert_eq!(message_id, "msg-123");
+            }
+            _ => panic!("Expected ReadReceipt message"),
+        }
+    } else {
+        panic!("Expected text message");
+    }
 }
 
 #[tokio::test]
 async fn given_offline_user_when_message_sent_then_received_on_connect() {
-    let addr = start_test_server().await;
+    let (addr, pg_pool) = start_test_server().await;
 
     // Connect user "charlie"
-    let charlie_url = format!("ws://{}/ws?token={}", addr, generate_token("charlie"));
+    let charlie_token = generate_token_and_session("charlie", &pg_pool).await;
+    let charlie_url = format!("ws://{}/ws?token={}", addr, charlie_token);
     let (mut charlie_ws, _) = connect_async(&charlie_url).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -182,7 +244,8 @@ async fn given_offline_user_when_message_sent_then_received_on_connect() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     // Now Dave connects
-    let dave_url = format!("ws://{}/ws?token={}", addr, generate_token("dave"));
+    let dave_token = generate_token_and_session("dave", &pg_pool).await;
+    let dave_url = format!("ws://{}/ws?token={}", addr, dave_token);
     let (mut dave_ws, _) = connect_async(&dave_url).await.unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -221,12 +284,14 @@ async fn given_offline_user_when_message_sent_then_received_on_connect() {
 
 #[tokio::test]
 async fn given_two_users_when_file_sent_then_received() {
-    let addr = start_test_server().await;
+    let (addr, pg_pool) = start_test_server().await;
 
-    let alice_url = format!("ws://{}/ws?token={}", addr, generate_token("alice"));
+    let alice_token = generate_token_and_session("alice", &pg_pool).await;
+    let alice_url = format!("ws://{}/ws?token={}", addr, alice_token);
     let (mut alice_ws, _) = connect_async(&alice_url).await.unwrap();
 
-    let bob_url = format!("ws://{}/ws?token={}", addr, generate_token("bob"));
+    let bob_token = generate_token_and_session("bob", &pg_pool).await;
+    let bob_url = format!("ws://{}/ws?token={}", addr, bob_token);
     let (mut bob_ws, _) = connect_async(&bob_url).await.unwrap();
 
     // Small delay to ensure Redis PubSub is active before sending messages

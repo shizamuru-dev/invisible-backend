@@ -1,0 +1,206 @@
+use anyhow::Result;
+use redis::{AsyncCommands, FromRedisValue};
+
+use shared::models::DatabaseEvent;
+use sqlx::PgPool;
+use tracing::{debug, error, info};
+
+pub async fn start_database_worker(db: PgPool, redis_client: redis::Client) {
+    info!("Starting database worker for message_events queue using Redis Streams...");
+
+    let mut backoff = 1;
+    let stream_name = "message_events";
+    let group_name = "db_workers";
+    let consumer_name = "worker1";
+
+    loop {
+        let mut conn = match redis_client.get_multiplexed_async_connection().await {
+            Ok(c) => {
+                backoff = 1;
+                c
+            }
+            Err(e) => {
+                error!(
+                    "Worker failed to connect to Redis: {}. Retrying in {}s...",
+                    e, backoff
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                backoff = std::cmp::min(backoff * 2, 60);
+                continue;
+            }
+        };
+
+        // Create consumer group if it doesn't exist
+        let _: redis::RedisResult<()> = redis::cmd("XGROUP")
+            .arg("CREATE")
+            .arg(stream_name)
+            .arg(group_name)
+            .arg("0")
+            .arg("MKSTREAM")
+            .query_async(&mut conn)
+            .await;
+
+        let mut read_id = "0";
+
+        loop {
+            let opts = redis::streams::StreamReadOptions::default()
+                .group(group_name, consumer_name)
+                .block(if read_id == ">" { 2000 } else { 0 })
+                .count(100);
+
+            let result: redis::RedisResult<redis::streams::StreamReadReply> =
+                conn.xread_options(&[stream_name], &[read_id], &opts).await;
+
+            match result {
+                Ok(reply) => {
+                    let mut processed_any = false;
+
+                    if reply.keys.is_empty() {
+                        if read_id == "0" {
+                            info!(
+                                "Finished processing Pending Entries List (PEL) for {}",
+                                consumer_name
+                            );
+                            read_id = ">";
+                        }
+                        continue;
+                    }
+                    for key in reply.keys {
+                        if key.key == stream_name {
+                            if !key.ids.is_empty() {
+                                processed_any = true;
+                            }
+                            let mut msg_ids = Vec::new();
+                            let mut events = Vec::new();
+
+                            for stream_id in key.ids {
+                                msg_ids.push(stream_id.id.clone());
+                                if let Some(event_json) = stream_id.map.get("event")
+                                    && let Ok(json_str) = String::from_redis_value(event_json)
+                                {
+                                    if let Ok(event) =
+                                        serde_json::from_str::<DatabaseEvent>(&json_str)
+                                    {
+                                        events.push(event);
+                                    } else {
+                                        error!("Failed to parse DatabaseEvent JSON: {}", json_str);
+                                    }
+                                }
+                            }
+
+                            if !events.is_empty() {
+                                if let Err(e) = process_events_batch(&db, events).await {
+                                    error!("Failed to process event batch: {}", e);
+                                    // Depending on policy, we might not ack to retry later
+                                } else {
+                                    // Acknowledge successfully processed messages
+                                    let mut cmd = redis::cmd("XACK");
+                                    cmd.arg(stream_name).arg(group_name);
+                                    for id in &msg_ids {
+                                        cmd.arg(id);
+                                    }
+                                    let _: redis::RedisResult<()> =
+                                        cmd.query_async(&mut conn).await;
+                                }
+                            } else if !msg_ids.is_empty() {
+                                // Ack unparseable messages so they don't block
+                                let mut cmd = redis::cmd("XACK");
+                                cmd.arg(stream_name).arg(group_name);
+                                for id in &msg_ids {
+                                    cmd.arg(id);
+                                }
+                                let _: redis::RedisResult<()> = cmd.query_async(&mut conn).await;
+                            }
+                        }
+                    }
+
+                    if read_id == "0" && !processed_any {
+                        info!(
+                            "Finished processing Pending Entries List (PEL) for {}",
+                            consumer_name
+                        );
+                        read_id = ">";
+                    }
+                }
+                Err(e) => {
+                    error!("Worker failed to read from Redis stream: {}", e);
+                    break; // reconnect
+                }
+            }
+        }
+    }
+}
+
+async fn process_events_batch(db: &PgPool, events: Vec<DatabaseEvent>) -> Result<()> {
+    debug!("Worker processing batch of {} events", events.len());
+
+    // Separate NewMessages and ReadReceipts
+    let mut new_messages = Vec::new();
+    let mut read_receipts = Vec::new();
+
+    for event in events {
+        match event {
+            DatabaseEvent::NewMessage {
+                id,
+                sender,
+                recipient,
+                message_type,
+                content,
+                file_name,
+                mime_type,
+                file_url,
+            } => {
+                new_messages.push((
+                    id,
+                    sender,
+                    recipient,
+                    message_type,
+                    content,
+                    file_name,
+                    mime_type,
+                    file_url,
+                ));
+            }
+            DatabaseEvent::ReadReceipt { message_id } => {
+                read_receipts.push(message_id);
+            }
+        }
+    }
+
+    let mut tx = db.begin().await?;
+
+    if !new_messages.is_empty() {
+        let mut query_builder = sqlx::QueryBuilder::new(
+            "INSERT INTO messages (id, sender_username, recipient_username, message_type, content, file_name, mime_type, file_url) ",
+        );
+
+        query_builder.push_values(new_messages, |mut b, (id, sender, recipient, message_type, content, file_name, mime_type, file_url)| {
+            b.push_bind(id)
+             .push_bind(sender)
+             .push_bind(recipient)
+             .push_bind(message_type)
+             .push_bind(content)
+             .push_bind(file_name)
+             .push_bind(mime_type)
+             .push_bind(file_url);
+        });
+
+        query_builder.push(" ON CONFLICT (id) DO NOTHING");
+        query_builder.build().execute(&mut *tx).await?;
+    }
+
+    if !read_receipts.is_empty() {
+        // Build a single update for all read receipts
+        let mut query_builder =
+            sqlx::QueryBuilder::new("UPDATE messages SET read_at = NOW() WHERE id IN (");
+        let mut separated = query_builder.separated(", ");
+        for id in read_receipts {
+            separated.push_bind(id);
+        }
+        separated.push_unseparated(") AND read_at IS NULL");
+        query_builder.build().execute(&mut *tx).await?;
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
