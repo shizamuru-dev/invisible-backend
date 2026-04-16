@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial setup of the `invisible-backend` project.
 - **Relay Service:** Real-time bidirectional WebSocket communication.
-- **Auth Service:** User registration and JWT-based authentication.
+- **API Service:** User registration and JWT-based authentication.
 - **Redis Pub/Sub Integration:** Horizontal scalability and inter-node message routing.
 - **PostgreSQL Integration:** Reliable offline message queuing.
 - **MinIO (S3) Integration:** Secure, out-of-band file transfers via 5-minute presigned URLs.

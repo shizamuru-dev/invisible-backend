@@ -8,7 +8,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  AUTH_IMAGE_NAME: ${{ github.repository }}/invisible-auth
+  API_IMAGE_NAME: ${{ github.repository }}/invisible-api
   RELAY_IMAGE_NAME: ${{ github.repository }}/invisible-relay
 
 jobs:
@@ -30,21 +30,21 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # --- Auth Service Image ---
-      - name: Extract metadata (tags, labels) for auth
-        id: meta-auth
+      # --- API Service Image ---
+      - name: Extract metadata (tags, labels) for api
+        id: meta-api
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.AUTH_IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ env.API_IMAGE_NAME }}
 
-      - name: Build and push auth image
+      - name: Build and push api image
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile.auth
+          file: ./Dockerfile.api
           push: true
-          tags: ${{ steps.meta-auth.outputs.tags }}
-          labels: ${{ steps.meta-auth.outputs.labels }}
+          tags: ${{ steps.meta-api.outputs.tags }}
+          labels: ${{ steps.meta-api.outputs.labels }}
 
       # --- Relay Service Image ---
       - name: Extract metadata (tags, labels) for relay
@@ -88,7 +88,7 @@ jobs:
       - name: Prepare binaries for release
         run: |
           mkdir -p dist
-          cp target/release/auth dist/invisible-auth-linux-amd64
+          cp target/release/api dist/invisible-api-linux-amd64
           cp target/release/relay dist/invisible-relay-linux-amd64
 
       - name: Create Release

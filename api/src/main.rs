@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "auth=debug,invisible_backend=debug".into()),
+                .unwrap_or_else(|_| "api=debug,invisible_backend=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
     let state = AppState { db, jwt_secret };
 
     let app = Router::new()
-        .route("/health", get(|| async { "Auth server is alive" }))
+        .route("/health", get(|| async { "API server is alive" }))
         .route("/api/auth/register", post(register_handler))
         .route("/api/auth/login", post(login_handler))
         .route("/files/presign", get(presign_handler))
@@ -161,7 +161,7 @@ async fn main() -> Result<()> {
 
     let addr = "0.0.0.0:3001";
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    info!("Auth API server listening on http://{}", addr);
+    info!("API server listening on http://{}", addr);
 
     axum::serve(listener, app).await?;
 

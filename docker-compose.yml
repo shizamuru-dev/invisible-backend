@@ -68,10 +68,10 @@ services:
       - DATABASE_URL=postgres://invisible:password@127.0.0.1:5432/invisible_chat
       - REDIS_URL=redis://127.0.0.1:6379/
 
-  auth:
+  api:
     build:
       context: .
-      dockerfile: Dockerfile.auth
+      dockerfile: Dockerfile.api
     ports:
       - "3001:3001"
     restart: unless-stopped

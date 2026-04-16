@@ -1,8 +1,8 @@
 [package]
-name = "auth"
+name = "api"
 version = "0.1.0"
 edition = "2024"
-description = "Invisible Backend API - Auth Server"
+description = "Invisible Backend API Server"
 publish = false
 
 [dependencies]

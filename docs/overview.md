@@ -14,7 +14,7 @@
 The project is organized into multiple crates:
 
 - `relay`: The WebSocket server handling real-time connections, message routing, and delivery receipts.
-- `auth`: Service handling authentication, presigned URLs for MinIO, and user management.
+- `api`: Service handling apientication, presigned URLs for MinIO, and user management.
 - `shared`: Shared models, database connections, and repository patterns used across services.
 
 ## Prerequisites & Setup
@@ -33,8 +33,8 @@ This will start PostgreSQL, Redis, MinIO, and a small init container that create
 # Start the relay server
 cargo run --bin relay
 
-# Start the auth server
-cargo run --bin auth
+# Start the api server
+cargo run --bin api
 ```
 
 ## Testing
