@@ -1,0 +1,16 @@
+{
+    "name": "invisible-backend-test-tool",
+    "version": "0.1.0",
+    "description": "Test tool for Invisible Backend E2EE API",
+    "type": "module",
+    "scripts": {
+        "test:api": "node src/api_test.js",
+        "test:ws": "node src/ws_test.js",
+        "test:e2ee": "node src/e2ee_test.js",
+        "test:all": "node src/all_tests.js"
+    },
+    "dependencies": {
+        "ws": "^8.16.0",
+        "axios": "^1.6.7"
+    }
+}

@@ -13,9 +13,6 @@ pub struct AppConfig {
     pub api_host: String,
     pub api_port: u16,
 
-    // Logging
-    pub loki_url: Option<String>,
-
     pub s3_endpoint: String,
     pub s3_access_key: String,
     pub s3_secret_key: String,
@@ -32,7 +29,6 @@ impl Default for AppConfig {
             api_url: "http://localhost:3001".into(),
             api_host: "0.0.0.0".into(),
             api_port: 3001,
-            loki_url: Some("http://127.0.0.1:3100".into()),
             s3_endpoint: "http://localhost:9000".into(),
             s3_access_key: "minioadmin".into(),
             s3_secret_key: "minioadmin".into(),

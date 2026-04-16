@@ -1,0 +1,23 @@
+#!/bin/sh
+# Pre-commit hook for invisible-backend
+# Runs cargo fmt and cargo clippy before each commit
+
+set -e
+
+echo "Running pre-commit checks..."
+
+# Check formatting
+echo "Checking formatting..."
+if ! cargo fmt --all -- --check; then
+    echo "Formatting issues found. Run 'cargo fmt --all' to fix."
+    exit 1
+fi
+
+# Run clippy
+echo "Running clippy..."
+if ! cargo clippy --workspace --all-targets --all-features -- -D warnings; then
+    echo "Clippy warnings found."
+    exit 1
+fi
+
+echo "Pre-commit checks passed!"

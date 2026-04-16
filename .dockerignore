@@ -5,3 +5,7 @@ target/
 **/*.rs.bk
 *.log
 .env
+test_tool/
+node_modules/
+*.md
+!.github/**/*.md

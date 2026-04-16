@@ -23,10 +23,28 @@ pub struct DeviceInfo {
     pub hwid: String,
 }
 
+/// Per-device ciphertext payload for E2EE message delivery.
+/// Used by both Signal Protocol (1-1 chats) and Olm/Megolm (groups, future).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DeviceCiphertext {
+    /// Target device UUID (matches `sessions.id`)
+    pub device_id: String,
+    /// Signal Protocol message type: 1 = Normal (Whisper), 3 = PreKey (initial handshake).
+    /// For future Megolm: 0 = Megolm ciphertext.
+    pub signal_type: i32,
+    /// Base64-encoded ciphertext body
+    pub ciphertext: String,
+}
+
 /// Message format expected from the client
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum IncomingMessage {
+    Encrypted {
+        to: String,
+        id: String,
+        ciphertexts: Vec<DeviceCiphertext>,
+    },
     Text {
         to: String,
         id: String,
@@ -55,6 +73,11 @@ pub enum IncomingMessage {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
 pub enum OutgoingMessage {
+    Encrypted {
+        from: String,
+        id: String,
+        ciphertexts: Vec<DeviceCiphertext>,
+    },
     Text {
         from: String,
         id: String,
@@ -84,8 +107,14 @@ pub enum OutgoingMessage {
     },
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum DatabaseEvent {
+    NewEncryptedMessage {
+        id: String,
+        sender: String,
+        recipient: String,
+        ciphertexts: Vec<DeviceCiphertext>,
+    },
     NewMessage {
         id: String,
         sender: String,

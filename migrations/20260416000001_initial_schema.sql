@@ -1,0 +1,26 @@
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username VARCHAR(255) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_username VARCHAR(255) REFERENCES users(username) ON DELETE CASCADE,
+    device_name VARCHAR(255),
+    device_model VARCHAR(255),
+    platform VARCHAR(255),
+    hwid VARCHAR(255),
+    refresh_token VARCHAR(255) UNIQUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    last_accessed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    is_valid BOOLEAN DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS offline_messages (
+    id SERIAL PRIMARY KEY,
+    to_user VARCHAR NOT NULL,
+    payload JSONB NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);

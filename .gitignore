@@ -27,3 +27,7 @@ target
 AGENTS.md
 session-*
 .kilo/
+
+# Node.js
+node_modules/
+test_tool/node_modules/

@@ -1,7 +1,7 @@
 use futures::{SinkExt, StreamExt};
 use jsonwebtoken::{EncodingKey, Header, encode};
 use relay::app;
-use shared::models::{Claims, IncomingMessage, OutgoingMessage};
+use shared::models::{Claims, DeviceCiphertext, IncomingMessage, OutgoingMessage};
 use shared::repository::{
     PgOfflineMessageRepository, RedisPresenceRepository, RedisPubSubRepository,
 };
@@ -15,25 +15,7 @@ use uuid::Uuid;
 async fn generate_token_and_session(username: &str, pg_pool: &PgPool) -> String {
     let session_id = Uuid::new_v4();
 
-    // Run migrations first instead of manual table creation
-    sqlx::migrate!("../migrations").run(pg_pool).await.unwrap();
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS sessions (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            user_username VARCHAR(255) REFERENCES users(username) ON DELETE CASCADE,
-            device_name VARCHAR(255),
-            device_model VARCHAR(255),
-            platform VARCHAR(255),
-            hwid VARCHAR(255),
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            last_accessed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            is_valid BOOLEAN DEFAULT TRUE
-        );",
-    )
-    .execute(pg_pool)
-    .await
-    .unwrap();
+    // Migrations are run by start_test_server(), tables already exist
 
     // Insert dummy user if not exists
     sqlx::query(
@@ -346,6 +328,160 @@ async fn given_two_users_when_file_sent_then_received() {
                 assert_eq!(file_url, "/download/12345");
             }
             _ => panic!("Expected File message"),
+        }
+    } else {
+        panic!("Expected text message");
+    }
+}
+
+#[tokio::test]
+async fn given_two_users_when_encrypted_message_sent_then_other_receives_it() {
+    let (addr, pg_pool) = start_test_server().await;
+
+    let alice_token = generate_token_and_session("alice_e2ee", &pg_pool).await;
+    let alice_url = format!("ws://{}/ws?token={}", addr, alice_token);
+    let (mut alice_ws, _) = connect_async(&alice_url).await.unwrap();
+
+    let bob_token = generate_token_and_session("bob_e2ee", &pg_pool).await;
+    let bob_url = format!("ws://{}/ws?token={}", addr, bob_token);
+    let (mut bob_ws, _) = connect_async(&bob_url).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let bob_session_id: String =
+        sqlx::query_scalar("SELECT id FROM sessions WHERE user_username = 'bob_e2ee' LIMIT 1")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+
+    let encrypted_incoming = IncomingMessage::Encrypted {
+        to: "bob_e2ee".to_string(),
+        id: "msg-e2ee-1".to_string(),
+        ciphertexts: vec![DeviceCiphertext {
+            device_id: bob_session_id.clone(),
+            signal_type: 3,
+            ciphertext: "dmFsaWQgY2lwaGVydGV4dA==".to_string(),
+        }],
+    };
+    alice_ws
+        .send(TgMessage::Text(
+            serde_json::to_string(&encrypted_incoming).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    // Alice should get a delivery receipt
+    let msg = alice_ws.next().await.unwrap().unwrap();
+    if let TgMessage::Text(text) = msg {
+        let outgoing: OutgoingMessage = serde_json::from_str(&text).unwrap();
+        match outgoing {
+            OutgoingMessage::DeliveryReceipt { to, message_id } => {
+                assert_eq!(to, "bob_e2ee");
+                assert_eq!(message_id, "msg-e2ee-1");
+            }
+            _ => panic!("Expected DeliveryReceipt for encrypted message"),
+        }
+    } else {
+        panic!("Expected text message");
+    }
+
+    // Bob should receive the encrypted message with his device_id
+    let msg = bob_ws.next().await.unwrap().unwrap();
+    if let TgMessage::Text(text) = msg {
+        let outgoing: OutgoingMessage = serde_json::from_str(&text).unwrap();
+        match outgoing {
+            OutgoingMessage::Encrypted {
+                from,
+                id,
+                ciphertexts,
+            } => {
+                assert_eq!(from, "alice_e2ee");
+                assert_eq!(id, "msg-e2ee-1");
+                assert_eq!(ciphertexts.len(), 1);
+                assert_eq!(ciphertexts[0].device_id, bob_session_id);
+                assert_eq!(ciphertexts[0].signal_type, 3);
+                assert_eq!(ciphertexts[0].ciphertext, "dmFsaWQgY2lwaGVydGV4dA==");
+            }
+            _ => panic!("Expected Encrypted message"),
+        }
+    } else {
+        panic!("Expected text message");
+    }
+}
+
+#[tokio::test]
+async fn given_offline_user_when_encrypted_message_sent_then_received_on_connect() {
+    let (addr, pg_pool) = start_test_server().await;
+
+    // Charlie sends encrypted message to Dave (who is offline)
+    let charlie_token = generate_token_and_session("charlie_e2ee", &pg_pool).await;
+    let charlie_url = format!("ws://{}/ws?token={}", addr, charlie_token);
+    let (mut charlie_ws, _) = connect_async(&charlie_url).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let dave_session_id: String =
+        sqlx::query_scalar("SELECT id FROM sessions WHERE user_username = 'dave_e2ee' LIMIT 1")
+            .fetch_one(&pg_pool)
+            .await
+            .unwrap();
+
+    let encrypted_incoming = IncomingMessage::Encrypted {
+        to: "dave_e2ee".to_string(),
+        id: "msg-e2ee-offline".to_string(),
+        ciphertexts: vec![DeviceCiphertext {
+            device_id: dave_session_id,
+            signal_type: 3,
+            ciphertext: "b2ZmbGluZSBtZXNzYWdl".to_string(),
+        }],
+    };
+    charlie_ws
+        .send(TgMessage::Text(
+            serde_json::to_string(&encrypted_incoming).unwrap().into(),
+        ))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Dave connects
+    let dave_token = generate_token_and_session("dave_e2ee", &pg_pool).await;
+    let dave_url = format!("ws://{}/ws?token={}", addr, dave_token);
+    let (mut dave_ws, _) = connect_async(&dave_url).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Dave should receive the queued encrypted message
+    let msg = dave_ws.next().await.unwrap().unwrap();
+    if let TgMessage::Text(text) = msg {
+        let outgoing: OutgoingMessage = serde_json::from_str(&text).unwrap();
+        match outgoing {
+            OutgoingMessage::Encrypted {
+                from,
+                id,
+                ciphertexts,
+            } => {
+                assert_eq!(from, "charlie_e2ee");
+                assert_eq!(id, "msg-e2ee-offline");
+                assert_eq!(ciphertexts.len(), 1);
+                assert_eq!(ciphertexts[0].ciphertext, "b2ZmbGluZSBtZXNzYWdl");
+            }
+            _ => panic!("Expected queued Encrypted message"),
+        }
+    } else {
+        panic!("Expected text message");
+    }
+
+    // Charlie should get a delivery receipt
+    let msg = charlie_ws.next().await.unwrap().unwrap();
+    if let TgMessage::Text(text) = msg {
+        let outgoing: OutgoingMessage = serde_json::from_str(&text).unwrap();
+        match outgoing {
+            OutgoingMessage::DeliveryReceipt { to, message_id } => {
+                assert_eq!(to, "dave_e2ee");
+                assert_eq!(message_id, "msg-e2ee-offline");
+            }
+            _ => panic!("Expected DeliveryReceipt for Charlie"),
         }
     } else {
         panic!("Expected text message");
