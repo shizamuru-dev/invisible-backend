@@ -8,9 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **E2EE Key Backup (Secure Vault):** Added `/keys/backup` endpoints (`POST`, `GET`, `DELETE`) to allow users to securely backup and recover their locally-encrypted cryptographic keys and message histories via a master password/recovery phrase.
 - **Read Receipts:** Added support for `ReadReceipt` messages. When a recipient opens the chat, the client sends a `ReadReceipt` which is then forwarded to the original sender (or queued if the sender is offline).
 - **Database Migrations:** Introduced `sqlx-cli` migrations (`migrations/`) instead of manual table creation in code, making schema evolutions safer.
 - **Configuration Management:** Migrated to `figment` for robust configuration loading. Configurations can now be set via `.env` or direct environment variables using the `AppConfig` struct.
+- **Docker & Deployment:** Eliminated hardcoded addresses/ports across the codebase. `docker-compose.yml` was completely refactored to support environment variables with fallbacks (via `.env`), enabling seamless integration into various deployment environments.
 - GitHub Actions workflow (`release.yml`) for automated building of Docker images (`ghcr.io`) and creating GitHub Releases with compiled binaries.
 - Formal `CHANGELOG.md` file to track project history.
 

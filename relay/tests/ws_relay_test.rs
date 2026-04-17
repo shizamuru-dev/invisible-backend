@@ -268,11 +268,11 @@ async fn given_offline_user_when_message_sent_then_received_on_connect() {
 async fn given_two_users_when_file_sent_then_received() {
     let (addr, pg_pool) = start_test_server().await;
 
-    let alice_token = generate_token_and_session("alice", &pg_pool).await;
+    let alice_token = generate_token_and_session("alice_file", &pg_pool).await;
     let alice_url = format!("ws://{}/ws?token={}", addr, alice_token);
     let (mut alice_ws, _) = connect_async(&alice_url).await.unwrap();
 
-    let bob_token = generate_token_and_session("bob", &pg_pool).await;
+    let bob_token = generate_token_and_session("bob_file", &pg_pool).await;
     let bob_url = format!("ws://{}/ws?token={}", addr, bob_token);
     let (mut bob_ws, _) = connect_async(&bob_url).await.unwrap();
 
@@ -281,7 +281,7 @@ async fn given_two_users_when_file_sent_then_received() {
 
     // Alice sends a File message to Bob
     let file_incoming = IncomingMessage::File {
-        to: "bob".to_string(),
+        to: "bob_file".to_string(),
         id: "msg-file-1".to_string(),
         file_name: "hello.txt".to_string(),
         mime_type: "text/plain".to_string(),
@@ -300,7 +300,7 @@ async fn given_two_users_when_file_sent_then_received() {
         let outgoing: OutgoingMessage = serde_json::from_str(&text).unwrap();
         match outgoing {
             OutgoingMessage::DeliveryReceipt { to, message_id } => {
-                assert_eq!(to, "bob");
+                assert_eq!(to, "bob_file");
                 assert_eq!(message_id, "msg-file-1");
             }
             _ => panic!("Expected DeliveryReceipt message for Alice's file"),
@@ -321,7 +321,7 @@ async fn given_two_users_when_file_sent_then_received() {
                 mime_type,
                 file_url,
             } => {
-                assert_eq!(from, "alice");
+                assert_eq!(from, "alice_file");
                 assert_eq!(id, "msg-file-1");
                 assert_eq!(file_name, "hello.txt");
                 assert_eq!(mime_type, "text/plain");

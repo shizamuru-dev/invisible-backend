@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod e2ee;
 pub mod worker;
 
@@ -31,6 +32,7 @@ pub struct AppState {
     pub db: PgPool,
     pub jwt_secret: String,
     pub redis_client: redis::Client,
+    pub config: shared::config::AppConfig,
 }
 
 pub struct AuthenticatedUser(pub Claims);
@@ -114,6 +116,9 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/auth/logout", post(logout_handler))
         .route("/keys/upload", post(e2ee::upload_keys))
         .route("/keys/claim/{user_id}", get(e2ee::claim_keys))
+        .route("/keys/backup", post(backup::upload_backup))
+        .route("/keys/backup", get(backup::get_backup))
+        .route("/keys/backup", delete(backup::delete_backup))
         .route("/keys/devices", get(e2ee::list_devices))
         .route("/keys/devices/{device_id}", delete(e2ee::delete_device))
         .route("/files/presign", get(presign_handler))
@@ -310,13 +315,14 @@ struct PresignResponse {
 }
 
 async fn presign_handler(
+    State(state): State<AppState>,
     _user: AuthenticatedUser,
     Query(_params): Query<PresignQuery>,
 ) -> impl IntoResponse {
     let file_id = Uuid::new_v4().to_string();
     Json(PresignResponse {
-        upload_url: format!("http://localhost:9000/{}", file_id),
-        download_url: format!("http://localhost:3001/files/download/{}", file_id),
+        upload_url: format!("{}/{}", state.config.s3_endpoint, file_id),
+        download_url: format!("{}/files/download/{}", state.config.api_url, file_id),
         file_id,
     })
 }

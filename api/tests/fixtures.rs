@@ -94,6 +94,7 @@ pub fn create_test_state(pool: &PgPool, secret: &str) -> AppState {
         db: pool.clone(),
         jwt_secret: secret.to_string(),
         redis_client: redis::Client::open("redis://127.0.0.1:6379/").unwrap(),
+        config: shared::config::AppConfig::default(),
     }
 }
 

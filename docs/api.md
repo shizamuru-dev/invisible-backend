@@ -329,3 +329,48 @@ The client retrieves a presigned URL, uploads the file directly to MinIO (bypass
 
 Securely downloads a file by its ID. Requires authentication (Bearer header or `?token=` query param).
 It automatically redirects the client to a 5-minute temporary presigned MinIO URL for the requested file.
+
+### Key Backup (Secure Vault)
+
+These endpoints allow clients to securely backup and restore their cryptographic keys (and optionally message history). The backend does not know the encryption password or recovery phrase, so all data must be encrypted client-side before uploading.
+
+#### `POST /keys/backup`
+Uploads or overwrites the user's encrypted key vault.
+
+**Request Body (JSON):**
+```json
+{
+  "encrypted_vault": "BASE64_ENCODED_CIPHERTEXT",
+  "salt": "BASE64_ENCODED_SALT",
+  "mac": "BASE64_ENCODED_MAC"
+}
+```
+
+**Responses:**
+- `200 OK`: Backup saved successfully.
+- `401 Unauthorized`: Missing or invalid token.
+
+#### `GET /keys/backup`
+Retrieves the user's encrypted key vault.
+
+**Response:**
+```json
+{
+  "encrypted_vault": "BASE64_ENCODED_CIPHERTEXT",
+  "salt": "BASE64_ENCODED_SALT",
+  "mac": "BASE64_ENCODED_MAC",
+  "updated_at": "2026-04-17T20:40:00Z"
+}
+```
+
+**Responses:**
+- `200 OK`: Backup returned.
+- `404 Not Found`: No backup exists for this user.
+- `401 Unauthorized`: Missing or invalid token.
+
+#### `DELETE /keys/backup`
+Deletes the user's encrypted key vault from the server.
+
+**Responses:**
+- `200 OK`: Backup deleted successfully.
+- `401 Unauthorized`: Missing or invalid token.

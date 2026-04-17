@@ -11,6 +11,8 @@ pub struct AppConfig {
     pub jwt_secret: String,
     pub api_url: String,
     pub api_host: String,
+    pub relay_host: String,
+    pub relay_port: u16,
     pub api_port: u16,
 
     pub s3_endpoint: String,
@@ -28,6 +30,8 @@ impl Default for AppConfig {
             jwt_secret: "super-secret-key-for-dev".into(),
             api_url: "http://localhost:3001".into(),
             api_host: "0.0.0.0".into(),
+            relay_host: "0.0.0.0".into(),
+            relay_port: 3030,
             api_port: 3001,
             s3_endpoint: "http://localhost:9000".into(),
             s3_access_key: "minioadmin".into(),

@@ -34,13 +34,14 @@ async fn main() -> Result<()> {
     let state = AppState {
         db,
         jwt_secret: config.jwt_secret.clone(),
+        config: config.clone(),
         redis_client: redis_client.clone(),
     };
 
     let app = create_router(state);
 
-    let addr = "0.0.0.0:3001";
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let addr = format!("{}:{}", config.api_host, config.api_port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("API server listening on http://{}", addr);
 
     axum::serve(listener, app).await?;

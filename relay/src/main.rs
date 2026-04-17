@@ -48,8 +48,8 @@ async fn main() -> Result<()> {
         config.jwt_secret,
     );
 
-    let addr = "0.0.0.0:3030";
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let addr = format!("{}:{}", config.relay_host, config.relay_port);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
     info!("Relay server listening on ws://{}", addr);
 
     axum::serve(listener, app).await?;
