@@ -1,78 +1,102 @@
-# Overview
+# Архитектура и обзор Backend (invisible-backend)
 
-`invisible-backend` is a scalable real-time chat backend.
+`invisible-backend` — это масштабируемый backend для чата в реальном времени, спроектированный с упором на безопасность, высокую производительность и сквозное шифрование (End-to-End Encryption).
 
-## Key Features
+## Основные архитектурные компоненты
 
-- **End-to-End Encryption (E2EE):** The server acts as a blind relay and PKI server. Signal Protocol (X3DH + Double Ratchet) for 1-1 chats; Olm/Megolm architecture prepared for future group chats. The server never sees plaintext message content.
-- **WebSockets:** Provides real-time bidirectional communication.
-- **Redis Pub/Sub:** Enables horizontal scalability for routing messages between different server instances.
-- **Redis Streams & Batching:** Background workers handle asynchronous batch insertion into PostgreSQL to prevent database locks and maximize Write IOPS under high load.
-- **Redis Caching:** Session validation is cached in Redis to minimize synchronous database round-trips upon connection.
-- **PostgreSQL:** Reliable message history storage, offline message queuing, and E2EE key distribution (device keys, signed pre-keys, one-time keys).
-- **MinIO (S3):** Used for out-of-band file transfers to prevent WebSocket memory bloat. Files are encrypted client-side before upload (AES-256-GCM with key exchange via Signal Protocol).
+Инфраструктура проекта строится на нескольких ключевых технологиях, обеспечивающих надежность и масштабируемость:
 
-## Workspace Structure
+- **PostgreSQL:** Основная реляционная база данных. Отвечает за надежное хранение истории сообщений, управление очередями сообщений для офлайн-пользователей и распределение криптографических ключей E2EE (ключи устройств, подписанные предварительные ключи (signed pre-keys), одноразовые ключи (one-time keys)).
+- **Redis:** Выполняет несколько критически важных функций:
+  - **Pub/Sub (Издатель/Подписчик):** Обеспечивает горизонтальное масштабирование, позволяя маршрутизировать сообщения между различными экземплярами серверов в кластере.
+  - **Streams & Batching (Потоки и пакетирование):** Фоновые воркеры обрабатывают асинхронную пакетную вставку данных в PostgreSQL. Это предотвращает блокировки базы данных и максимизирует количество операций записи (Write IOPS) при высоких нагрузках.
+  - **Кэширование:** Данные валидации сессий кэшируются в Redis для минимизации синхронных запросов к базе данных при каждом новом подключении.
+- **MinIO (S3-совместимое хранилище):** Используется для передачи файлов вне основного канала (out-of-band), чтобы избежать переполнения памяти веб-сокетов (WebSocket memory bloat). Файлы шифруются на стороне клиента перед загрузкой.
 
-The project is organized into multiple crates:
+## Структура проекта (Crates)
 
-- `relay`: The WebSocket server handling real-time connections, message routing (including E2EE encrypted blobs), Redis Stream publishing, and delivery receipts.
-- `api`: HTTP API service handling authentication, E2EE key distribution (`/keys/upload`, `/keys/claim`, `/keys/devices`), presigned URLs for MinIO, user management, and the asynchronous Database Worker.
-- `shared`: Shared models (including `DeviceCiphertext`, `IncomingMessage::Encrypted`, etc.), database connections, and repository patterns used across services.
+Проект на Rust (Cargo Workspace) разделен на несколько логических модулей (крейтов):
 
-## Prerequisites & Setup
+- **`api` (HTTP API):** HTTP REST-сервис, обрабатывающий аутентификацию, управление пользователями, распределение ключей E2EE (`/keys/upload`, `/keys/claim`, `/keys/devices`), генерацию предварительно подписанных URL (presigned URLs) для MinIO, а также содержащий асинхронный воркер базы данных.
+- **`relay` (WebSocket Server):** Сервер веб-сокетов, управляющий подключениями в реальном времени. Отвечает за маршрутизацию сообщений (включая зашифрованные бинарные данные E2EE), публикацию событий в Redis Stream и обработку уведомлений о доставке (delivery receipts).
+- **`shared` (Общая логика):** Разделяемые модели данных (включая `DeviceCiphertext`, `IncomingMessage::Encrypted` и т.д.), пулы подключений к базам данных и паттерны репозиториев (Repository patterns), используемые в других сервисах.
 
-Requires Docker and Docker Compose. Clone the repository and start everything with:
+## Протоколы связи
+
+Взаимодействие между клиентами и сервером осуществляется через два основных протокола:
+
+- **HTTP (REST API):** Используется для stateless-операций: регистрация, авторизация, загрузка и получение E2EE ключей, запрос ссылок на скачивание/загрузку медиафайлов, получение исторической переписки.
+- **WebSockets:** Обеспечивает персистентное двунаправленное соединение. Используется для мгновенной доставки сообщений, обновлений статуса присутствия (online/offline), индикаторов набора текста и квитанций о прочтении/доставке.
+
+## Сквозное шифрование (End-to-End Encryption - E2EE)
+
+Безопасность данных — фундаментальная основа `invisible-backend`. Сервер функционирует исключительно как «слепой» ретранслятор (blind relay) и сервер инфраструктуры открытых ключей (PKI).
+
+- **Signal Protocol:** Для личных (1-1) чатов используется стандарт индустрии — протокол Signal (комбинация X3DH для согласования ключей и Double Ratchet для их обновления).
+- **Olm/Megolm:** Архитектура заранее подготовлена для интеграции групповых чатов на базе протоколов Olm/Megolm.
+- **Нулевой доступ:** Сервер никогда не имеет доступа к содержимому сообщений в открытом виде (plaintext). Все сообщения проходят через сервер в виде зашифрованных бинарных данных (blobs).
+- **Шифрование файлов:** Передача медиафайлов и вложений (через MinIO) также защищена. Файлы шифруются на клиенте с использованием алгоритма AES-256-GCM, а ключи для их расшифровки передаются внутри зашифрованных E2EE сообщений (через Signal Protocol).
+
+## Инструкции по установке и запуску
+
+Для развертывания проекта вам потребуются установленные **Docker** и **Docker Compose**.
+
+### Быстрый старт (Docker)
+
+Склонируйте репозиторий и выполните следующую команду в корневой папке проекта:
 
 ```bash
 docker compose up -d
 ```
 
-This will build Rust services and start all containers: PostgreSQL, Redis, MinIO, API, and Relay.
+Эта команда автоматически соберет Rust-сервисы и запустит все необходимые контейнеры: PostgreSQL, Redis, MinIO, а также сервисы API и Relay.
 
-## Configuration
+### Управление контейнерами
 
-The project uses `figment` for configuration. Configuration is loaded from:
-1. Default values in code (`AppConfig::default()`)
-2. Environment variables (overrides defaults)
-
-Environment variables for Docker Compose are defined in `docker-compose.yml`:
-- `DATABASE_URL` — PostgreSQL connection string
-- `REDIS_URL` — Redis connection string
-- `JWT_SECRET` — JWT signing key (change for production!)
-- `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` — MinIO settings
-
-## Database Migrations
-
-Migrations are in `migrations/` directory and run automatically when services start.
-
-## Running the Services
-
-With Docker:
 ```bash
-docker compose up -d        # Start all services
-docker compose logs -f      # Follow logs
-docker compose down         # Stop all services
+docker compose up -d        # Запустить все сервисы в фоновом режиме
+docker compose logs -f      # Просмотр логов в реальном времени
+docker compose down         # Остановить и удалить все контейнеры
 ```
 
-Without Docker (local development):
+### Локальная разработка (без Docker)
+
+Если вы хотите запустить Rust-сервисы локально (при наличии уже запущенных PostgreSQL, Redis и MinIO):
+
 ```bash
-# Requires PostgreSQL, Redis, MinIO running locally
-cargo run --bin relay       # Start relay server
-cargo run --bin api         # Start API server
+cargo run --bin relay       # Запуск WebSocket сервера (Relay)
+cargo run --bin api         # Запуск HTTP REST сервера (API)
 ```
 
-## Testing
+## Конфигурация
 
-**Rust Integration Tests:**
+Проект использует библиотеку `figment` для управления конфигурацией. Настройки загружаются в следующем порядке:
+1. Значения по умолчанию, заданные в коде (`AppConfig::default()`).
+2. Переменные окружения (Environment variables), которые переопределяют значения по умолчанию.
+
+Основные переменные окружения (определены в `docker-compose.yml`):
+- `DATABASE_URL` — строка подключения к PostgreSQL.
+- `REDIS_URL` — строка подключения к Redis.
+- `JWT_SECRET` — секретный ключ для подписи JWT токенов (**обязательно измените для production среды!**).
+- `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` — настройки для подключения к MinIO/S3.
+
+## Миграции базы данных
+
+SQL-миграции хранятся в директории `migrations/` и применяются автоматически при старте сервисов (интегрировано через `sqlx`).
+
+## Тестирование
+
+Проект покрыт тестами на нескольких уровнях.
+
+**Интеграционные тесты Rust:**
 ```bash
 cargo test --workspace -- --test-threads=1
 ```
 
-**Node.js API Tests** (requires running services):
+**API-тесты на Node.js** (требуют запущенных сервисов):
 ```bash
 cd test_tool && npm install
 API_URL=http://localhost:3001 RELAY_WS_URL=ws://localhost:3030 npm run test:all
 ```
 
-**GitHub Actions CI** runs both on every PR (fmt → clippy → test → integration).
+Непрерывная интеграция (CI) через GitHub Actions автоматически запускает форматирование (`fmt`), линтер (`clippy`) и все уровни тестов для каждого Pull Request.

@@ -1,0 +1,3 @@
+ALTER TABLE messages ALTER COLUMN file_url TYPE TEXT;
+ALTER TABLE messages ALTER COLUMN file_name TYPE TEXT;
+ALTER TABLE messages ALTER COLUMN mime_type TYPE TEXT;

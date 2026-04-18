@@ -1,0 +1,32 @@
+{
+	email mmihajlov534@mail.ru
+	admin localhost:2019
+}
+
+invisible.glitched.network {
+	reverse_proxy localhost:3001
+}
+
+api.invisible.glitched.network {
+	reverse_proxy localhost:3001
+}
+
+relay.invisible.glitched.network {
+	reverse_proxy localhost:3030
+}
+
+invisible.localhost {
+	reverse_proxy localhost:3001
+}
+
+api.invisible.localhost {
+	reverse_proxy localhost:3001
+}
+
+relay.invisible.localhost {
+	reverse_proxy localhost:3030
+}
+
+localhost {
+	reverse_proxy localhost:3001
+}

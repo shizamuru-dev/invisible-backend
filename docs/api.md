@@ -1,189 +1,19 @@
-# API Documentation
+# Документация API
 
-## WebSocket API
+Это единый источник истины (single source of truth) для всех контрактов API.
 
-**URL:** `ws://localhost:3030`
+## 1. HTTP REST Endpoints
 
-### Connection
+**Базовый URL:** `http://localhost:3001`
 
-To connect, provide a valid JWT token in the `token` query parameter:
-`ws://localhost:3030?token=eyJhbGci...`
+### Авторизация (Auth)
 
-The server decodes the token using the `JWT_SECRET` and extracts the `sub` claim as the user's ID. If the token is missing, invalid, or expired, the WebSocket connection is rejected with `401 Unauthorized`.
-
-### Client -> Server (IncomingMessage)
-
-Messages sent by the client must be JSON strings with the following formats:
-
-#### Text Message
-```json
-{
-  "type": "Text",
-  "to": "bob",
-  "id": "msg-123",
-  "content": "Hello, Bob!"
-}
-```
-
-#### File Message
-```json
-{
-  "type": "File",
-  "to": "bob",
-  "id": "msg-file-123",
-  "file_name": "image.png",
-  "mime_type": "image/png",
-  "file_url": "http://localhost:9000/chat-files/image.png"
-}
-```
-
-#### Encrypted Message (E2EE)
-Sends an end-to-end encrypted message. The `ciphertexts` array contains one entry per target device. The server cannot decrypt the content.
-
-```json
-{
-  "type": "Encrypted",
-  "to": "bob",
-  "id": "msg-e2ee-456",
-  "ciphertexts": [
-    {
-      "device_id": "550e8400-e29b-41d4-a716-446655440000",
-      "signal_type": 3,
-      "ciphertext": "BASE64_ENCODED_CIPHERTEXT"
-    },
-    {
-      "device_id": "661f9511-f3ac-52e5-b827-557766551111",
-      "signal_type": 1,
-      "ciphertext": "BASE64_ENCODED_CIPHERTEXT"
-    }
-  ]
-}
-```
-
-`signal_type` values: `3` = PreKey message (first message / new session), `1` = Normal message (established session).
-
-#### Typing Indicator
-```json
-{
-  "type": "Typing",
-  "to": "bob"
-}
-```
-
-#### Read Receipt
-```json
-{
-  "type": "ReadReceipt",
-  "to": "bob",
-  "message_id": "msg-123"
-}
-```
-
-#### Watch Presence
-```json
-{
-  "type": "WatchPresence",
-  "user_ids": ["bob", "charlie"]
-}
-```
-
-### Server -> Client (OutgoingMessage)
-
-The server sends messages back to the client in these formats.
-
-#### Text Message
-```json
-{
-  "type": "Text",
-  "from": "alice",
-  "id": "msg-123",
-  "content": "Hello, Bob!"
-}
-```
-
-#### File Message
-```json
-{
-  "type": "File",
-  "from": "alice",
-  "id": "msg-file-123",
-  "file_name": "image.png",
-  "mime_type": "image/png",
-  "file_url": "http://localhost:9000/chat-files/image.png"
-}
-```
-
-#### Encrypted Message (E2EE)
-Received when the sender sends an encrypted message targeting the current user's devices.
-
-```json
-{
-  "type": "Encrypted",
-  "from": "alice",
-  "id": "msg-e2ee-456",
-  "ciphertexts": [
-    {
-      "device_id": "550e8400-e29b-41d4-a716-446655440000",
-      "signal_type": 3,
-      "ciphertext": "BASE64_ENCODED_CIPHERTEXT"
-    }
-  ]
-}
-```
-
-The client should find the ciphertext entry matching its own `device_id` (from the JWT `session_id`) and decrypt it locally using the Signal Protocol session.
-
-#### Typing Indicator
-```json
-{
-  "type": "Typing",
-  "from": "alice"
-}
-```
-
-#### Delivery Receipt
-When a user successfully receives a text or file message, the server immediately sends a delivery receipt to the original sender.
-
-```json
-{
-  "type": "DeliveryReceipt",
-  "to": "bob",
-  "message_id": "msg-123"
-}
-```
-
-#### Read Receipt
-When the recipient opens the chat and reads the message, their client should send a ReadReceipt. The server forwards it to the original sender.
-
-```json
-{
-  "type": "ReadReceipt",
-  "from": "alice",
-  "message_id": "msg-123"
-}
-```
-
-#### Presence Update
-When users come online or go offline, or when initially requested.
-
-```json
-{
-  "type": "PresenceUpdate",
-  "user_id": "bob",
-  "is_online": true
-}
-```
-
-## HTTP API
-
-**URL:** `http://localhost:3001`
-
-### Authentication
+Все конечные точки, кроме `/api/auth/register` и `/api/auth/login`, требуют наличия валидного JWT токена. Его можно передать в заголовке `Authorization: Bearer <token>` или в параметре запроса `?token=<token>`.
 
 #### `POST /api/auth/register`
-Registers a new user in the system.
+Регистрирует нового пользователя.
 
-**Request Body (JSON):**
+**Тело запроса (JSON):**
 ```json
 {
   "username": "alice",
@@ -191,15 +21,19 @@ Registers a new user in the system.
 }
 ```
 
-**Responses:**
-- `201 Created`: User created successfully.
-- `400 Bad Request`: Username or password missing.
-- `409 Conflict`: Username already exists.
+**Ответы и статусы:**
+- `201 Created`: Пользователь успешно создан.
+- `400 Bad Request`: Отсутствует имя пользователя или пароль.
+- `409 Conflict`: Имя пользователя уже существует.
+
+**Потенциальные ошибки и подводные камни:**
+- Пароли никогда не сохраняются в открытом виде, сервер их хеширует. 
+- Убедитесь, что запросы выполняются по защищенному (HTTPS) соединению для предотвращения перехвата данных в реальной среде.
 
 #### `POST /api/auth/login`
-Authenticates a user and returns a session token. Also registers a new session in PostgreSQL and caches it in Redis.
+Аутентифицирует пользователя и возвращает сессионный токен. Сервер регистрирует новую сессию в базе данных (PostgreSQL) и добавляет ее в кеш (Redis).
 
-**Request Body (JSON):**
+**Тело запроса (JSON):**
 ```json
 {
   "username": "alice",
@@ -213,32 +47,37 @@ Authenticates a user and returns a session token. Also registers a new session i
 }
 ```
 
-`device_info` is optional. If provided, the device is registered with the given metadata (used for E2EE device management).
+*Примечание: `device_info` опционально. Если передано, сервер зарегистрирует устройство для использования в сквозном шифровании (E2EE).*
 
-**Responses:**
+**Ответы и статусы:**
 - `200 OK`:
   ```json
   {
-    "token": "eyJ0eXAi... (JWT Token valid for 7 days)"
+    "token": "eyJ0eXAi... (JWT токен, действителен 7 дней)"
   }
   ```
-- `401 Unauthorized`: Invalid username or password.
+- `401 Unauthorized`: Неверное имя пользователя или пароль.
+
+**Потенциальные ошибки и подводные камни:**
+- Отсутствие объекта `device_info` приведет к тому, что устройство не будет полноценно зарегистрировано в подсистеме E2EE, и ключи X3DH не смогут быть привязаны к нему.
 
 #### `POST /api/auth/logout`
-Logs the user out of the current session, immediately invalidating the session in PostgreSQL and deleting it from the Redis cache. Requires Authentication.
+Завершает сессию пользователя, инвалидирует её в PostgreSQL и удаляет из Redis. Требует авторизации.
 
-**Responses:**
-- `200 OK`: Successfully logged out.
-- `401 Unauthorized`: Missing, invalid, or expired token.
+**Ответы и статусы:**
+- `200 OK`: Успешный выход.
+- `401 Unauthorized`: Токен отсутствует, недействителен или истёк.
 
-### E2EE Key Management
+---
 
-All key management endpoints require authentication with a valid JWT token (Bearer header).
+### Управление ключами E2EE (E2EE Keys)
+
+Все операции требуют JWT авторизации.
 
 #### `POST /keys/upload`
-Uploads the current device's cryptographic key bundle. Used for Signal Protocol X3DH key distribution. Should be called after device registration and periodically to replenish one-time keys.
+Загружает связку криптографических ключей (bundle) текущего устройства, необходимую для протокола Signal X3DH. Вызывается после регистрации устройства и периодически для пополнения одноразовых ключей.
 
-**Request Body (JSON):**
+**Тело запроса (JSON):**
 ```json
 {
   "identity_key": "BASE64_ENCODED_IDENTITY_PUBLIC_KEY",
@@ -255,15 +94,18 @@ Uploads the current device's cryptographic key bundle. Used for Signal Protocol 
 }
 ```
 
-**Responses:**
-- `200 OK`: Keys uploaded successfully. Identity and Signed PreKey are upserted; OTKs are inserted (duplicates ignored).
-- `400 Bad Request`: Invalid session ID in JWT.
-- `401 Unauthorized`: Missing or invalid token.
+**Ответы и статусы:**
+- `200 OK`: Ключи успешно загружены. Ключи Identity и Signed PreKey обновляются (upsert), а одноразовые ключи (OTK) добавляются (дубликаты игнорируются).
+- `400 Bad Request`: Недействительный ID сессии в JWT.
+- `401 Unauthorized`: Токен отсутствует или недействителен.
+
+**Потенциальные ошибки и подводные камни:**
+- Если клиент не пополняет список `one_time_keys`, новые собеседники в конечном итоге будут вынуждены устанавливать сессию без одноразового ключа (fallback mode), что снижает уровень криптографической защиты от некоторых видов атак.
 
 #### `GET /keys/claim/{username}`
-Claims the key bundle for all devices of a given user. Used by the sender to initiate an X3DH handshake with each device. **One-Time Keys are consumed atomically** -- each call pops one OTK per device.
+Запрашивает связку ключей (bundle) для всех устройств указанного пользователя, чтобы отправитель мог начать рукопожатие X3DH. **Важно: одноразовые ключи расходуются атомарно** — каждый вызов извлекает (pop) один OTK для каждого устройства.
 
-**Response:**
+**Ответ (`200 OK`):**
 ```json
 {
   "devices": [
@@ -286,32 +128,29 @@ Claims the key bundle for all devices of a given user. Used by the sender to ini
 }
 ```
 
-**Responses:**
-- `200 OK`: Key bundles returned.
-- `404 Not Found`: No keys found for this user (user has no registered devices).
-- `401 Unauthorized`: Missing or invalid token.
+**Ответы и статусы:**
+- `200 OK`: Ключи получены.
+- `401 Unauthorized`: Неавторизован.
+- `404 Not Found`: У пользователя нет зарегистрированных ключей или устройств.
 
-**Note:** `one_time_key` may be `null` if all OTKs for a device have been consumed. The client should still proceed with the X3DH handshake using only the Signed PreKey in this case (fallback mode). `one_time_keys_remaining` shows how many OTKs are left for that device (before the current claim). When it reaches 0, client should upload fresh OTKs via `POST /keys/upload`.
+**Потенциальные ошибки и подводные камни:**
+- Поле `one_time_key` может быть `null`, если все ключи для устройства исчерпаны. Клиент должен уметь обрабатывать эту ситуацию и использовать базовое рукопожатие (только с Signed PreKey). 
+- Поле `one_time_keys_remaining` указывает, сколько ключей оставалось до извлечения. Когда это значение достигает нуля на стороне владельца устройства, он должен срочно отправить новый набор ключей через `/keys/upload`.
 
-### Files
+---
 
-All file endpoints require authentication. You must provide a valid JWT token either:
-- In the `Authorization` header as a Bearer token (`Authorization: Bearer <token>`)
-- As a query parameter (`?token=<token>`)
+### Файлы (Files)
+
+Требуют авторизации (через `Authorization: Bearer` или параметр `?token=`).
 
 #### `GET /files/presign`
+Предоставляет временные безопасные URL-адреса для прямой загрузки файлов в MinIO, минуя основной сервер.
 
-Provides temporary, secure URLs for uploading files to MinIO.
-The client retrieves a presigned URL, uploads the file directly to MinIO (bypassing the server), and then sends a WebSocket `File` message with the resulting URL.
+**Параметры запроса:**
+- `file_name` (string, обязательно): Имя файла.
+- `mime_type` (string, обязательно): MIME-тип файла.
 
-**Note:** Both the returned `upload_url` and the actual MinIO download links behind the `download_url` are only valid for **5 minutes**.
-
-#### Query Parameters
-- `file_name` (string, required): The name of the file to be uploaded.
-- `mime_type` (string, required): The MIME type of the file.
-
-#### Response
-**Status:** 200 OK
+**Ответ (`200 OK`):**
 ```json
 {
   "upload_url": "http://localhost:9000/uploads/... (Presigned URL)",
@@ -320,24 +159,27 @@ The client retrieves a presigned URL, uploads the file directly to MinIO (bypass
 }
 ```
 
-#### Upload Flow
-1. Client requests `GET /files/presign?file_name=photo.jpg&mime_type=image/jpeg` (with token).
-2. Client performs a `PUT` request to `upload_url` with the file content.
-3. Client sends a WebSocket `File` message containing the `download_url`.
+**Процесс загрузки:**
+1. Запрос `GET /files/presign` (с токеном).
+2. Выполнение `PUT` запроса с бинарным содержимым файла по ссылке `upload_url`.
+3. Отправка WebSocket-сообщения типа `File` со ссылкой из `download_url`.
+
+**Потенциальные ошибки и подводные камни:**
+- Срок действия и `upload_url`, и конечных ссылок, стоящих за `download_url`, ограничен **5 минутами**. Загрузку и скачивание необходимо начинать своевременно. Если срок действия истёк, клиент получит ошибку 403 Forbidden от MinIO.
 
 #### `GET /files/download/{file_id}`
+Безопасное скачивание файла по ID. Автоматически перенаправляет клиента (HTTP 302/307) на 5-минутную presigned-ссылку в MinIO.
 
-Securely downloads a file by its ID. Requires authentication (Bearer header or `?token=` query param).
-It automatically redirects the client to a 5-minute temporary presigned MinIO URL for the requested file.
+---
 
-### Key Backup (Secure Vault)
+### Резервное копирование ключей (Secure Vault)
 
-These endpoints allow clients to securely backup and restore their cryptographic keys (and optionally message history). The backend does not know the encryption password or recovery phrase, so all data must be encrypted client-side before uploading.
+Сервер работает с зашифрованными данными. Он не знает ни пароля шифрования, ни фразы восстановления. Все данные должны быть зашифрованы на клиенте перед загрузкой.
 
 #### `POST /keys/backup`
-Uploads or overwrites the user's encrypted key vault.
+Сохраняет или перезаписывает зашифрованное хранилище (Vault) текущего пользователя.
 
-**Request Body (JSON):**
+**Тело запроса (JSON):**
 ```json
 {
   "encrypted_vault": "BASE64_ENCODED_CIPHERTEXT",
@@ -346,14 +188,14 @@ Uploads or overwrites the user's encrypted key vault.
 }
 ```
 
-**Responses:**
-- `200 OK`: Backup saved successfully.
-- `401 Unauthorized`: Missing or invalid token.
+**Ответы и статусы:**
+- `200 OK`: Успешно сохранено.
+- `401 Unauthorized`
 
 #### `GET /keys/backup`
-Retrieves the user's encrypted key vault.
+Возвращает зашифрованное хранилище.
 
-**Response:**
+**Ответ (`200 OK`):**
 ```json
 {
   "encrypted_vault": "BASE64_ENCODED_CIPHERTEXT",
@@ -363,14 +205,285 @@ Retrieves the user's encrypted key vault.
 }
 ```
 
-**Responses:**
-- `200 OK`: Backup returned.
-- `404 Not Found`: No backup exists for this user.
-- `401 Unauthorized`: Missing or invalid token.
+**Ответы и статусы:**
+- `200 OK`: Данные успешно получены.
+- `404 Not Found`: У пользователя нет резервной копии.
+- `401 Unauthorized`
 
 #### `DELETE /keys/backup`
-Deletes the user's encrypted key vault from the server.
+Удаляет хранилище ключей пользователя с сервера.
 
-**Responses:**
-- `200 OK`: Backup deleted successfully.
-- `401 Unauthorized`: Missing or invalid token.
+**Ответы и статусы:**
+- `200 OK`: Успешное удаление.
+- `401 Unauthorized`
+
+---
+
+### Устройства (Devices)
+
+#### `GET /keys/devices`
+Список всех активных устройств текущего пользователя.
+
+**Ответ (`200 OK`):**
+```json
+[
+  {
+    "device_id": "550e8400-e29b-41d4-a716-446655440000",
+    "device_name": "Alice's iPhone",
+    "device_model": "iPhone 15 Pro",
+    "platform": "iOS",
+    "created_at": "2026-04-17T20:40:00Z",
+    "registration_id": 12345,
+    "otk_remaining": 42
+  }
+]
+```
+
+#### `DELETE /keys/devices/{device_id}`
+Удаляет конкретное устройство, его сессию и ключи.
+
+**Ответы и статусы:**
+- `200 OK`: Успешно удалено.
+- `404 Not Found`: Устройство не найдено или принадлежит другому пользователю.
+
+---
+
+### Диалоги и сообщения (Dialogs)
+
+#### `GET /api/dialogs`
+Получение списка диалогов, отсортированных по времени последнего сообщения.
+
+**Ответ (`200 OK`):**
+```json
+[
+  {
+    "peer": "bob",
+    "last_message_id": "uuid",
+    "last_message_content": "Hello",
+    "last_message_time": "2026-04-17T20:40:00Z",
+    "unread_count": 5
+  }
+]
+```
+
+#### `GET /api/messages/{username}?limit=50&after=uuid`
+История переписки между текущим пользователем и `username`.
+
+**Ответ (`200 OK`):**
+```json
+[
+  {
+    "id": "uuid",
+    "from": "alice",
+    "content": "Hello",
+    "message_type": "Text",
+    "created_at": "2026-04-17T20:40:00Z"
+  }
+]
+```
+
+#### `GET /api/dialogs/{peer}/read-state`
+Состояние прочтения в диалоге с `peer`.
+
+**Ответ (`200 OK`):**
+```json
+{
+  "peer": "bob",
+  "last_read_message_id": "uuid",
+  "unread_count": 0,
+  "updated_at": "2026-04-17T20:40:00Z"
+}
+```
+
+#### `POST /api/dialogs/{peer}/read?message_id=uuid`
+Отмечает сообщения в диалоге как прочитанные. Если передан `message_id`, помечает всё до этого сообщения (включительно). Иначе помечает все сообщения в диалоге.
+
+**Ответы и статусы:**
+- `200 OK`: Успешно помечено.
+
+---
+
+## 2. WebSocket Протокол
+
+**URL:** `ws://localhost:3030`
+
+### Подключение (Connection Rules)
+
+Для подключения передайте валидный JWT в параметре `token`:
+`ws://localhost:3030?token=eyJhbGci...`
+
+Сервер декодирует токен используя `JWT_SECRET` и извлекает ID пользователя из поля `sub`.
+
+**Потенциальные ошибки и подводные камни:**
+- Если токен отсутствует, недействителен или просрочен, WebSocket-соединение сбрасывается сервером с кодом HTTP `401 Unauthorized` во время Handshake.
+
+---
+
+### Клиент -> Сервер (Входящие сообщения)
+
+Все сообщения должны быть валидными JSON строками следующей структуры:
+
+#### Текстовое сообщение (Text)
+```json
+{
+  "type": "Text",
+  "to": "bob",
+  "id": "msg-123",
+  "content": "Hello, Bob!"
+}
+```
+
+#### Файл (File)
+```json
+{
+  "type": "File",
+  "to": "bob",
+  "id": "msg-file-123",
+  "file_name": "image.png",
+  "mime_type": "image/png",
+  "file_url": "http://localhost:9000/chat-files/image.png"
+}
+```
+
+#### Зашифрованное сообщение E2EE (Encrypted)
+Для отправки зашифрованных (End-to-End) сообщений. Сервер не имеет доступа к их содержимому.
+
+```json
+{
+  "type": "Encrypted",
+  "to": "bob",
+  "id": "msg-e2ee-456",
+  "ciphertexts": [
+    {
+      "device_id": "550e8400-e29b-41d4-a716-446655440000",
+      "signal_type": 3,
+      "ciphertext": "BASE64_ENCODED_CIPHERTEXT"
+    },
+    {
+      "device_id": "661f9511-f3ac-52e5-b827-557766551111",
+      "signal_type": 1,
+      "ciphertext": "BASE64_ENCODED_CIPHERTEXT"
+    }
+  ]
+}
+```
+
+*Значения `signal_type`: `3` = PreKey сообщение (первое сообщение / установка новой сессии), `1` = Обычное сообщение (сессия уже установлена).*
+
+**Потенциальные ошибки и подводные камни:**
+- Массив `ciphertexts` должен содержать уникальный шифротекст для **каждого устройства** целевого пользователя. Если отправитель пропустит какое-либо устройство, получатель не сможет прочитать сообщение на этом устройстве.
+
+#### Индикатор набора текста (Typing)
+```json
+{
+  "type": "Typing",
+  "to": "bob"
+}
+```
+
+#### Отчет о прочтении (ReadReceipt)
+```json
+{
+  "type": "ReadReceipt",
+  "to": "bob",
+  "message_id": "msg-123"
+}
+```
+
+#### Подписка на статус пользователей (Watch Presence)
+```json
+{
+  "type": "WatchPresence",
+  "user_ids": ["bob", "charlie"]
+}
+```
+
+---
+
+### Сервер -> Клиент (Исходящие сообщения)
+
+Сервер отправляет клиентам сообщения в следующих форматах:
+
+#### Текстовое сообщение (Text)
+```json
+{
+  "type": "Text",
+  "from": "alice",
+  "id": "msg-123",
+  "content": "Hello, Bob!"
+}
+```
+
+#### Файл (File)
+```json
+{
+  "type": "File",
+  "from": "alice",
+  "id": "msg-file-123",
+  "file_name": "image.png",
+  "mime_type": "image/png",
+  "file_url": "http://localhost:9000/chat-files/image.png"
+}
+```
+
+#### Зашифрованное сообщение E2EE (Encrypted)
+Получается, когда другой пользователь отправляет зашифрованное сообщение на текущее устройство.
+
+```json
+{
+  "type": "Encrypted",
+  "from": "alice",
+  "id": "msg-e2ee-456",
+  "ciphertexts": [
+    {
+      "device_id": "550e8400-e29b-41d4-a716-446655440000",
+      "signal_type": 3,
+      "ciphertext": "BASE64_ENCODED_CIPHERTEXT"
+    }
+  ]
+}
+```
+
+**Потенциальные ошибки и подводные камни:**
+- Клиент должен самостоятельно найти в массиве `ciphertexts` объект, соответствующий его локальному `device_id` (полученному из сессии/JWT), и расшифровать только его с помощью Signal Protocol.
+
+#### Индикатор набора текста (Typing)
+```json
+{
+  "type": "Typing",
+  "from": "alice"
+}
+```
+
+#### Отчет о доставке (DeliveryReceipt)
+Когда пользователь (адресат) успешно получает текстовое сообщение или файл через WebSocket, сервер немедленно пересылает отправителю подтверждение доставки.
+
+```json
+{
+  "type": "DeliveryReceipt",
+  "to": "bob",
+  "message_id": "msg-123"
+}
+```
+
+#### Отчет о прочтении (ReadReceipt)
+Когда получатель открывает чат и читает сообщение, его клиент отправляет `ReadReceipt`. Сервер перенаправляет это сообщение исходному автору.
+
+```json
+{
+  "type": "ReadReceipt",
+  "from": "alice",
+  "message_id": "msg-123"
+}
+```
+
+#### Обновление статуса в сети (PresenceUpdate)
+Рассылается, когда пользователи (за которыми наблюдает клиент) выходят в сеть или отключаются от нее, либо в ответ на запрос подписки `WatchPresence`.
+
+```json
+{
+  "type": "PresenceUpdate",
+  "user_id": "bob",
+  "is_online": true
+}
+```

@@ -105,7 +105,14 @@ pub async fn start_database_worker(db: PgPool, redis_client: redis::Client) {
                             if !events.is_empty() {
                                 if let Err(e) = process_events_batch(&db, events).await {
                                     error!("Failed to process event batch: {}", e);
-                                    // Don't ACK parseable_ids — they will be retried via PEL
+                                    // Modified to always ACK so it does not block the queue
+                                    let mut cmd = redis::cmd("XACK");
+                                    cmd.arg(stream_name).arg(group_name);
+                                    for id in &parseable_ids {
+                                        cmd.arg(id);
+                                    }
+                                    let _: redis::RedisResult<()> =
+                                        cmd.query_async(&mut conn).await;
                                 } else {
                                     let mut cmd = redis::cmd("XACK");
                                     cmd.arg(stream_name).arg(group_name);

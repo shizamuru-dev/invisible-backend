@@ -6,7 +6,7 @@ description = "Invisible Backend API Server"
 publish = false
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 reqwest = { workspace = true, features = ["json"] }
 
 [dependencies]

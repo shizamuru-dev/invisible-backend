@@ -250,6 +250,21 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
     let current_user_id = user_id.clone();
     let tx_recv = tx.clone();
 
+    let mut redis_conn_for_events = match state_clone
+        .redis_client
+        .get_multiplexed_async_connection()
+        .await
+    {
+        Ok(c) => Some(c),
+        Err(e) => {
+            error!(
+                "Failed to get redis connection for queueing messages: {}",
+                e
+            );
+            None
+        }
+    };
+
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(text) = msg {
@@ -358,22 +373,7 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
                         };
 
                         // Save message to history asynchronously via Redis
-                        let redis_conn = match state_clone
-                            .redis_client
-                            .get_multiplexed_async_connection()
-                            .await
-                        {
-                            Ok(c) => Some(c),
-                            Err(e) => {
-                                error!(
-                                    "Failed to get redis connection for queueing message: {}",
-                                    e
-                                );
-                                None
-                            }
-                        };
-
-                        if let Some(mut r) = redis_conn {
+                        if let Some(r) = redis_conn_for_events.as_mut() {
                             let db_event = match &outgoing {
                                 OutgoingMessage::Encrypted {
                                     from,
@@ -430,7 +430,7 @@ pub async fn handle_socket(socket: WebSocket, user_id: String, state: Arc<AppSta
                                     .arg("*")
                                     .arg("event")
                                     .arg(json)
-                                    .query_async(&mut r)
+                                    .query_async(r)
                                     .await
                                     .unwrap_or_else(|e: redis::RedisError| {
                                         error!("Failed to xadd message_events to Redis: {}", e);

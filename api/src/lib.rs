@@ -317,12 +317,51 @@ struct PresignResponse {
 async fn presign_handler(
     State(state): State<AppState>,
     _user: AuthenticatedUser,
-    Query(_params): Query<PresignQuery>,
+    Query(params): Query<PresignQuery>,
 ) -> impl IntoResponse {
     let file_id = Uuid::new_v4().to_string();
+    let file_path = format!("/{}", file_id);
+
+    use s3::Bucket;
+    use s3::creds::Credentials;
+    use s3::region::Region;
+
+    let region = Region::Custom {
+        region: state.config.s3_region.clone(),
+        endpoint: state.config.s3_endpoint.clone(),
+    };
+
+    let creds = Credentials::new(
+        Some(&state.config.s3_access_key),
+        Some(&state.config.s3_secret_key),
+        None,
+        None,
+        None,
+    )
+    .expect("Failed to create S3 credentials");
+
+    let bucket = Bucket::new(&state.config.s3_bucket, region, creds)
+        .expect("Failed to create S3 bucket")
+        .with_path_style();
+
+    let mut headers = axum::http::HeaderMap::new();
+    if let Ok(val) = axum::http::HeaderValue::from_str(&params.mime_type) {
+        headers.insert(axum::http::header::CONTENT_TYPE, val);
+    }
+
+    let upload_url = bucket
+        .presign_put(&file_path, 3600, Some(headers.clone()), None)
+        .await
+        .unwrap_or_else(|_| "".to_string());
+
+    let download_url = bucket
+        .presign_get(&file_path, 3600, None)
+        .await
+        .unwrap_or_else(|_| "".to_string());
+
     Json(PresignResponse {
-        upload_url: format!("{}/{}", state.config.s3_endpoint, file_id),
-        download_url: format!("{}/files/download/{}", state.config.api_url, file_id),
+        upload_url,
+        download_url,
         file_id,
     })
 }
